@@ -1,4 +1,4 @@
--- Desk Research: five tables.
+-- Target Audience Reach Navigator: existing five-table layout, extended in place.
 -- sources     -> where we collect from
 -- materials   -> what the collector brought (one row per link)
 -- findings    -> what the worker extracted with the model
@@ -30,20 +30,62 @@ CREATE TABLE IF NOT EXISTS materials (
     url           TEXT NOT NULL UNIQUE,
     title         TEXT NOT NULL,
     text          TEXT,
+    content_hash  TEXT,
     published_at  TIMESTAMPTZ,
     collected_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    status        TEXT NOT NULL DEFAULT 'new'   -- new | done | skipped | failed
+    status        TEXT NOT NULL DEFAULT 'new',  -- new | done | skipped | failed
+    processed_prompt_version TEXT,
+    processing_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS findings (
     id              SERIAL PRIMARY KEY,
-    material_id     INTEGER NOT NULL UNIQUE REFERENCES materials(id),
-    entity          TEXT,                 -- company the material is about
+    material_id     INTEGER NOT NULL REFERENCES materials(id),
+    finding_index   INTEGER NOT NULL DEFAULT 1,
+    entity          TEXT,                 -- legacy field, kept for old rows
+    topic           TEXT,
+    indicator_type  TEXT,
+    ir_applicability TEXT,
+    geography       TEXT,
+    audience        TEXT,
+    indicator       TEXT,
+    value           TEXT,
+    percent_base    TEXT,
+    study_period    TEXT,
+    useful_for      TEXT,
+    evidence        TEXT,
     summary         TEXT NOT NULL,
     model           TEXT NOT NULL,
     prompt_version  TEXT NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Additive migration for databases created by the original workshop project.
+ALTER TABLE materials ADD COLUMN IF NOT EXISTS content_hash TEXT;
+ALTER TABLE materials ADD COLUMN IF NOT EXISTS processed_prompt_version TEXT;
+ALTER TABLE materials ADD COLUMN IF NOT EXISTS processing_error TEXT;
+
+-- The old schema allowed one finding per material. A research publication may
+-- contain several useful statistics, so uniqueness now includes prompt version
+-- and the position of the finding in the model response.
+ALTER TABLE findings DROP CONSTRAINT IF EXISTS findings_material_id_key;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS finding_index INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS topic TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS indicator_type TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS ir_applicability TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS geography TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS audience TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS indicator TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS value TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS percent_base TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS study_period TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS useful_for TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS evidence TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS materials_content_hash_unique
+    ON materials (content_hash) WHERE content_hash IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS findings_material_prompt_position_unique
+    ON findings (material_id, prompt_version, finding_index);
 
 -- the bot marks a finding when it has been sent to subscribers
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
@@ -54,10 +96,15 @@ CREATE TABLE IF NOT EXISTS subscribers (
     started_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Preserve workshop data, but stop collecting the old AI-news sources.
+UPDATE sources SET active = FALSE
+WHERE kind IN ('hn', 'arxiv', 'rss')
+  AND name IN ('Hacker News', 'Hacker News: Anthropic', 'Hacker News: OpenAI', 'arXiv cs.AI', 'Хабр: ИИ');
+
 INSERT INTO sources (name, kind, url) VALUES
-    ('Hacker News', 'hn',    'https://hn.algolia.com/api/v1/search_by_date?query=AI&tags=story&hitsPerPage=15'),
-    ('Hacker News: Anthropic', 'hn', 'https://hn.algolia.com/api/v1/search_by_date?query=Anthropic&tags=story&hitsPerPage=15'),
-    ('Hacker News: OpenAI',    'hn', 'https://hn.algolia.com/api/v1/search_by_date?query=OpenAI&tags=story&hitsPerPage=15'),
-    ('arXiv cs.AI', 'arxiv', 'https://export.arxiv.org/api/query?search_query=cat:cs.AI&sortBy=submittedDate&sortOrder=descending&max_results=10'),
-    ('Хабр: ИИ',    'rss',   'https://habr.com/ru/rss/hubs/artificial_intelligence/articles/')
-ON CONFLICT (name) DO NOTHING;
+    ('ФОМ: исследования', 'fom_rss', 'https://fom.ru/rss/all'),
+    ('НАФИ: результаты опросов', 'nafi_html', 'https://nafi.ru/polls/'),
+    ('Data Insight: исследования', 'datainsight_rss', 'https://datainsight.ru/rss.xml'),
+    ('Банк России: новое на сайте', 'cbr_rss', 'https://www.cbr.ru/rss/RssNews')
+ON CONFLICT (name) DO UPDATE
+SET kind = EXCLUDED.kind, url = EXCLUDED.url, active = TRUE;

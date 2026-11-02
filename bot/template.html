@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Desk Research</title>
+<title>Навигатор достижимости ЦА</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 /*BRAND*/
@@ -117,8 +117,8 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 <div class="app">
   <header class="head" id="head">
     <div class="brand">
-      <h1 class="wordmark">Desk Research</h1>
-      <span class="label">AI</span>
+      <h1 class="wordmark">Навигатор ЦА</h1>
+      <span class="label">IR DATA</span>
     </div>
     <div class="label meta" id="meta"></div>
   </header>
@@ -172,7 +172,7 @@ function openLink(url) {
 
 const findings = DATA.findings;
 const lastRun = DATA.run ? DATA.run.id : null;
-const state = { view: "feed", period: "all", company: "all", open: null, feedScroll: 0 };
+const state = { view: "feed", period: "all", topic: "all", open: null, feedScroll: 0 };
 
 const PERIODS = [
   { key: "all", name: "Все", days: Infinity },
@@ -181,10 +181,10 @@ const PERIODS = [
   { key: "month", name: "Месяц", days: 31 },
 ];
 const inPeriod = (f, key) => (Date.now() - new Date(f.date).getTime()) / 864e5 <= PERIODS.find((x) => x.key === key).days;
-const companies = [...new Set(findings.map((f) => f.reason).filter(Boolean))].sort((a, b) => findings.filter((f) => f.reason === b).length - findings.filter((f) => f.reason === a).length);
-const byCompany = (f, c) => c === "all" || f.reason === c;
+const topics = [...new Set(findings.map((f) => f.reason).filter(Boolean))].sort((a, b) => findings.filter((f) => f.reason === b).length - findings.filter((f) => f.reason === a).length);
+const byTopic = (f, topic) => topic === "all" || f.reason === topic;
 const visible = () => findings
-  .filter((f) => inPeriod(f, state.period) && byCompany(f, state.company))
+  .filter((f) => inPeriod(f, state.period) && byTopic(f, state.topic))
   .sort((a, b) => b.date.localeCompare(a.date));
 
 /* ---------- filters ---------- */
@@ -193,15 +193,15 @@ function renderFilters() {
   $("#filters").style.display = show ? "" : "none";
   if (!show) return;
   $("#periods").innerHTML = PERIODS.map((p) => {
-    const n = findings.filter((f) => inPeriod(f, p.key) && byCompany(f, state.company)).length;
+    const n = findings.filter((f) => inPeriod(f, p.key) && byTopic(f, state.topic)).length;
     return `<button class="chip" data-period="${p.key}" aria-pressed="${state.period === p.key}">${p.name}<span class="num">${n}</span></button>`;
   }).join("");
-  $("#sources").innerHTML = ["all", ...companies].map((c) => {
-    const n = findings.filter((f) => inPeriod(f, state.period) && byCompany(f, c)).length;
-    return `<button class="chip" data-company="${esc(c)}" aria-pressed="${state.company === c}">${c === "all" ? "Все компании" : esc(c)}<span class="num">${n}</span></button>`;
+  $("#sources").innerHTML = ["all", ...topics].map((topic) => {
+    const n = findings.filter((f) => inPeriod(f, state.period) && byTopic(f, topic)).length;
+    return `<button class="chip" data-topic="${esc(topic)}" aria-pressed="${state.topic === topic}">${topic === "all" ? "Все темы" : esc(topic)}<span class="num">${n}</span></button>`;
   }).join("");
   document.querySelectorAll("[data-period]").forEach((b) => b.onclick = () => { state.period = b.dataset.period; haptic(); render(); });
-  document.querySelectorAll("[data-company]").forEach((b) => b.onclick = () => { state.company = b.dataset.company; haptic(); render(); });
+  document.querySelectorAll("[data-topic]").forEach((b) => b.onclick = () => { state.topic = b.dataset.topic; haptic(); render(); });
 }
 
 /* ---------- feed ---------- */
@@ -220,7 +220,7 @@ function renderFeed() {
         <span class="src">${esc(f.source)}</span><span>· ${day(f.date)}</span>
         ${tags(f).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}
       </span>
-      <p>${esc(f.summary)}</p>
+      <p>${f.value ? `<strong>${esc(f.value)}</strong> · ` : ""}${esc(f.summary)}</p>
     </button></li>`).join("")}</ul>`;
 }
 
@@ -242,6 +242,17 @@ function renderDetail(f) {
     <span class="label">${esc(f.source)} · ${day(f.date)}${f.run_id === lastRun ? " · новое" : ""}</span>
     <h2>${esc(f.summary)}</h2>
     ${same ? "" : `<p class="orig">${esc(f.title)}</p>`}
+    <div class="rec">
+      <span class="label">Статистический показатель</span>
+      <p>${f.value ? `<strong>${esc(f.value)}</strong> · ` : ""}${esc(f.indicator_type || "other")}</p>
+      <p class="key">Применимость для IR: ${esc(f.ir_applicability || "—")}</p>
+      ${f.audience ? `<p class="key">Аудитория: ${esc(f.audience)}</p>` : ""}
+      ${f.percent_base ? `<p class="key">База: ${esc(f.percent_base)}</p>` : ""}
+      ${f.geography ? `<p class="key">География: ${esc(f.geography)}</p>` : ""}
+      ${f.study_period ? `<p class="key">Период исследования: ${esc(f.study_period)}</p>` : ""}
+      ${f.useful_for ? `<p>${esc(f.useful_for)}</p>` : ""}
+      ${f.evidence ? `<p class="excerpt">Подтверждение: «${esc(f.evidence)}»</p>` : ""}
+    </div>
     ${text ? `<p class="excerpt">${text}</p>` : ""}
     ${tags(f).length ? `<div class="tags">${tags(f).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div>` : ""}
     ${inTelegram ? "" : `<button class="btn main" data-url="${esc(f.url)}">Открыть материал</button>`}
@@ -251,7 +262,7 @@ function renderDetail(f) {
       <p class="say">В каждой записи лежит номер записи из другой таблицы. По этим номерам от находки доходим до источника.</p>
       <div class="rec">
         <span class="label"><span>findings</span><span class="num">id ${f.id}</span></span>
-        <p class="key">entity = ${esc(f.reason || "—")} · model = ${esc(f.model)}</p>
+        <p class="key">topic = ${esc(f.reason || "—")} · type = ${esc(f.indicator_type || "other")} · IR = ${esc(f.ir_applicability || "—")} · model = ${esc(f.model)}</p>
         <p class="key">material_id = ${f.material_id}${f.sent_at ? ` · отправлена ${esc(f.sent_at.slice(0, 16).replace("T", " "))}` : ""}</p>
       </div>
       <span class="link">material_id → materials.id</span>
@@ -286,8 +297,8 @@ function renderHow() {
       say: `В базе Postgres сейчас ${t.materials} ${plural(t.materials, "материал", "материала", "материалов")}. Повторы она не пускает.`,
       more: `У ссылки в таблице <code>materials</code> стоит правило <code>UNIQUE</code>: одна ссылка не попадет в базу дважды. Каждый материал знает свой источник (<code>source_id</code>) и прогон сбора (<code>run_id</code>).` },
     { verb: "Разобрал", metric: `<mark>${r.kept}</mark>`,
-      say: `Модель посмотрела ${r.processed} ${plural(r.processed, "материал", "материала", "материалов")}: ${r.kept} ${plural(r.kept, "стал находкой", "стали находками", "стали находками")}, ${r.skipped} не про AI${r.failed ? `, ${r.failed} не разобрано` : ""}${r.waiting ? `, ${r.waiting} ждут очереди` : ""}.`,
-      more: `Это единственное место системы, где работает модель: <code>worker/main.py</code>. Она решает, про AI ли материал, пишет одну фразу и выбирает компанию из списка <code>ENTITIES</code>. Находка ложится в таблицу <code>findings</code> со ссылкой на материал.` },
+      say: `Модель посмотрела ${r.processed} ${plural(r.processed, "материал", "материала", "материалов")}: сохранила ${r.kept} ${plural(r.kept, "статистическую находку", "статистические находки", "статистических находок")}, ${r.skipped} материалов пропустила${r.failed ? `, ${r.failed} не разобрано` : ""}${r.waiting ? `, ${r.waiting} ждут очереди` : ""}.`,
+      more: `Модель в <code>worker/main.py</code> извлекает до пяти показателей, их аудиторию, базу процента и дословное подтверждение. Значения без подтверждающего фрагмента не сохраняются.` },
     { verb: "Отправил", metric: r.sent,
       say: r.sent ? `Бот прислал ${r.sent} ${plural(r.sent, "находку", "находки", "находок")} подписчикам: их ${t.subscribers}.` : `Из этого сбора бот еще ничего не рассылал. Подписчиков: ${t.subscribers}.`,
       more: `Когда модель разобрала весь сбор, бот присылает одну сводку всем из таблицы <code>subscribers</code> и ставит находкам отметку <code>sent_at</code>. Поэтому одна находка не придет дважды. Код: <code>bot/main.py</code>.` },
@@ -365,7 +376,7 @@ function render() {
   view.querySelectorAll("[data-step]").forEach((b) => b.onclick = () => stepFinding(Number(b.dataset.step)));
   view.querySelectorAll("[data-url]").forEach((b) => b.onclick = () => openLink(b.dataset.url));
   view.querySelectorAll("[data-back]").forEach((b) => b.onclick = closeDetail);
-  view.querySelectorAll("[data-reset]").forEach((b) => b.onclick = () => { state.period = "all"; state.company = "all"; render(); });
+  view.querySelectorAll("[data-reset]").forEach((b) => b.onclick = () => { state.period = "all"; state.topic = "all"; render(); });
   view.querySelectorAll(".stepbox").forEach((b) => b.onclick = () => b.setAttribute("aria-expanded", b.getAttribute("aria-expanded") !== "true"));
   view.querySelectorAll(".step").forEach((s, i) => setTimeout(() => s.classList.add("shown"), 80 + i * 160));
 

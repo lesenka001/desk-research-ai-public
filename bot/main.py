@@ -1,4 +1,4 @@
-"""Bot: Telegram bot and a Mini App with the findings.
+"""Bot: Telegram bot and a Mini App with statistical findings.
 
 - remembers everyone who pressed Start (table subscribers);
 - after each collection is sorted by the worker, sends one summary to subscribers and marks findings.sent_at;
@@ -25,7 +25,7 @@ SEND_EVERY_SECONDS = 60
 LATEST = 5  # findings listed in the summary, the rest are in the feed
 
 COMMANDS = [
-    {"command": "start", "description": "подписаться на находки"},
+    {"command": "start", "description": "подписаться на новые исследования"},
     {"command": "status", "description": "что было в последних прогонах"},
 ]
 
@@ -81,10 +81,18 @@ def say(chat_id, text, button=True):
 
 def finding_lines(rows):
     lines = []
-    for summary, entity, url, source in rows:
-        line = f'• <a href="{html.escape(url)}">{html.escape(summary)}</a>\n  {html.escape(source)}'
-        if entity:
-            line += f" · {html.escape(entity)}"
+    for summary, value, audience, percent_base, ir_applicability, url, source in rows:
+        headline = f"{value} — {summary}" if value and value not in summary else summary
+        line = f'• <a href="{html.escape(url)}">{html.escape(headline)}</a>\n  {html.escape(source)}'
+        details = []
+        if audience:
+            details.append(f"аудитория: {html.escape(audience)}")
+        if percent_base:
+            details.append(f"база: {html.escape(percent_base)}")
+        if ir_applicability:
+            details.append(f"для IR: {html.escape(ir_applicability)}")
+        if details:
+            line += "\n  " + " · ".join(details)
         lines.append(line)
     return lines
 
@@ -128,21 +136,31 @@ def send_new(conn):
     if busy:
         return
     subscribers = [row[0] for row in conn.execute("SELECT chat_id FROM subscribers")]
-    ids = [row[0] for row in conn.execute("SELECT id FROM findings WHERE sent_at IS NULL")]
+    ids = [
+        row[0]
+        for row in conn.execute(
+            "SELECT f.id FROM findings f JOIN materials m ON m.id = f.material_id"
+            " WHERE f.sent_at IS NULL AND (m.processed_prompt_version IS NULL"
+            " OR f.prompt_version = m.processed_prompt_version)"
+        )
+    ]
     if not subscribers or not ids:
         return
-    companies = conn.execute(
-        "SELECT coalesce(entity, 'без компании'), count(*) FROM findings WHERE id = ANY(%s)"
-        " GROUP BY entity ORDER BY entity IS NULL, count(*) DESC",
+    sources = conn.execute(
+        "SELECT s.name, count(*) FROM findings f"
+        " JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id"
+        " WHERE f.id = ANY(%s) GROUP BY s.name ORDER BY count(*) DESC, s.name",
         (ids,),
     ).fetchall()
     latest = conn.execute(
-        "SELECT f.summary, f.entity, m.url, s.name FROM findings f"
+        "SELECT f.summary, f.value, f.audience, f.percent_base, f.ir_applicability, m.url, s.name FROM findings f"
         " JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id"
         " WHERE f.id = ANY(%s) ORDER BY f.id DESC LIMIT %s",
         (ids, LATEST),
     ).fetchall()
-    text = f"<b>Новых находок: {len(ids)}</b>\n" + " · ".join(f"{html.escape(name)} {count}" for name, count in companies)
+    text = f"<b>Новых статистических находок: {len(ids)}</b>\n" + " · ".join(
+        f"{html.escape(name)} {count}" for name, count in sources
+    )
     text += "\n\nСвежие:\n\n" + "\n\n".join(finding_lines(latest))
     if len(ids) > LATEST:
         text += f"\n\nЕще {len(ids) - LATEST} в ленте."
@@ -198,10 +216,12 @@ def handle(conn, message):
             (chat["id"], name),
         )
         latest = conn.execute(
-            "SELECT f.summary, f.entity, m.url, s.name FROM findings f"
-            " JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id ORDER BY f.id DESC LIMIT 5"
+            "SELECT f.summary, f.value, f.audience, f.percent_base, f.ir_applicability, m.url, s.name FROM findings f"
+            " JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id"
+            " WHERE m.processed_prompt_version IS NULL OR f.prompt_version = m.processed_prompt_version"
+            " ORDER BY f.id DESC LIMIT 5"
         ).fetchall()
-        text = "Готово, вы подписаны. После каждого сбора пришлю сюда одну сводку: сколько новых находок и по каким компаниям."
+        text = "Готово, вы подписаны. После каждого сбора пришлю сводку новых исследований и статистических показателей."
         if latest:
             text += "\n\nПоследние:\n\n" + "\n\n".join(finding_lines(latest))
         text += "\n\nВсе находки в ленте: кнопка ниже или «Лента» рядом с полем ввода. /status покажет, как работают блоки."
@@ -268,6 +288,15 @@ def page_data(conn):
         "material_id",
         "summary",
         "reason",
+        "value",
+        "indicator_type",
+        "ir_applicability",
+        "audience",
+        "percent_base",
+        "geography",
+        "study_period",
+        "useful_for",
+        "evidence",
         "title",
         "url",
         "date",
@@ -281,9 +310,12 @@ def page_data(conn):
     )
     findings = []
     for row in conn.execute(
-        "SELECT f.id, m.id, f.summary, f.entity, m.title, m.url, coalesce(m.published_at, m.collected_at), m.run_id,"
+        "SELECT f.id, m.id, f.summary, f.topic, f.value, f.indicator_type, f.ir_applicability, f.audience,"
+        " f.percent_base, f.geography, f.study_period, f.useful_for, f.evidence,"
+        " m.title, m.url, coalesce(m.published_at, m.collected_at), m.run_id,"
         " s.id, s.name, s.url, left(m.text, 600), f.sent_at, f.model"
         " FROM findings f JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id"
+        " WHERE m.processed_prompt_version IS NULL OR f.prompt_version = m.processed_prompt_version"
         " ORDER BY f.id DESC LIMIT 300"
     ):
         finding = dict(zip(fields, row))

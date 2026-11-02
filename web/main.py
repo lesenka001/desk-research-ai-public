@@ -1,4 +1,4 @@
-"""Web: one page with the latest findings and the map of the system."""
+"""Web: one page with the latest audience-research statistics."""
 
 import html
 import os
@@ -11,7 +11,7 @@ SERVICE = "web"
 PAGE = """<!doctype html>
 <html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Desk Research: разговоры об AI</title>
+<title>Навигатор достижимости ЦА</title>
 <style>
   body {{ font-family: -apple-system, system-ui, sans-serif; margin: 0; background: #f6f5f1; color: #1a1a1a; }}
   main {{ max-width: 960px; margin: 0 auto; padding: 24px 16px; }}
@@ -30,13 +30,13 @@ PAGE = """<!doctype html>
   .tag {{ background: #e8f5c8; padding: 1px 6px; white-space: nowrap; }}
 </style></head>
 <body><main>
-<h1>Desk Research: разговоры об AI</h1>
-<div class="muted">Система ведущих потока. Страница обновляется при каждом открытии.</div>
+<h1>Навигатор достижимости ЦА</h1>
+<div class="muted">Открытые исследования и статистика, потенциально полезные для оценки целевых аудиторий.</div>
 
 <div class="map">
   <div class="block"><b>Сбор</b><span>collector: обходит источники</span></div><div class="arrow">&rarr;</div>
   <div class="block"><b>База</b><span>Postgres: хранит все</span></div><div class="arrow">&rarr;</div>
-  <div class="block"><b>Обработка</b><span>worker: модель отбирает и пишет</span></div><div class="arrow">&rarr;</div>
+  <div class="block"><b>Обработка</b><span>worker: извлекает проверяемые показатели</span></div><div class="arrow">&rarr;</div>
   <div class="block"><b>Страница</b><span>web: показывает находки</span></div>
 </div>
 
@@ -48,12 +48,27 @@ PAGE = """<!doctype html>
 </div>
 
 <table>
-<tr><th>Когда</th><th>Источник</th><th>Компания</th><th>О чем</th></tr>
+<tr><th>Когда</th><th>Источник</th><th>Тип</th><th>Для IR</th><th>Показатель</th><th>Аудитория и база</th><th>Находка</th></tr>
 {rows}
 </table>
 </main></body></html>"""
 
-ROW = '<tr><td>{date}</td><td>{source}</td><td>{entity}</td><td><a href="{url}" target="_blank">{summary}</a></td></tr>'
+ROW = """<tr><td>{date}</td><td>{source}</td><td>{kind}</td><td>{applicability}</td><td>{value}</td>
+<td>{audience}</td><td><a href="{url}" target="_blank">{summary}</a></td></tr>"""
+
+TYPE_LABELS = {
+    "population_share": "доля аудитории",
+    "conditional_share": "доля в подгруппе",
+    "absolute_count": "абсолютное число",
+    "market_metric": "рыночный показатель",
+    "other": "другое",
+}
+
+IR_LABELS = {
+    "direct": "прямо",
+    "indirect": "косвенно",
+    "context_only": "только контекст",
+}
 
 
 def render(conn):
@@ -65,10 +80,13 @@ def render(conn):
     ).fetchone()
     last_run = f"{last[1]:%d.%m %H:%M} UTC, {last[0]}" if last else "еще не было"
     rows = conn.execute(
-        """SELECT m.published_at, s.name, f.entity, f.summary, m.url
+        """SELECT m.published_at, s.name, f.indicator_type, f.ir_applicability, f.value,
+                  f.audience, f.percent_base, f.summary, m.url
            FROM findings f
            JOIN materials m ON m.id = f.material_id
            JOIN sources s ON s.id = m.source_id
+           WHERE m.processed_prompt_version IS NULL
+              OR f.prompt_version = m.processed_prompt_version
            ORDER BY m.published_at DESC NULLS LAST LIMIT 100"""
     ).fetchall()
     rows_html = (
@@ -76,15 +94,26 @@ def render(conn):
             ROW.format(
                 date=f"{published:%d.%m %H:%M}" if published else "",
                 source=html.escape(source),
-                entity=f'<span class="tag">{html.escape(entity)}</span>'
-                if entity
-                else "",
+                kind=f'<span class="tag">{html.escape(TYPE_LABELS.get(indicator_type, indicator_type or "—"))}</span>',
+                applicability=html.escape(IR_LABELS.get(ir_applicability, ir_applicability or "—")),
+                value=html.escape(value or "—"),
+                audience="<br>".join(
+                    part
+                    for part in (
+                        html.escape(audience) if audience else "",
+                        f'<span class="muted">База: {html.escape(percent_base)}</span>'
+                        if percent_base
+                        else "",
+                    )
+                    if part
+                )
+                or "—",
                 summary=html.escape(summary),
                 url=html.escape(url, quote=True),
             )
-            for published, source, entity, summary, url in rows
+            for published, source, indicator_type, ir_applicability, value, audience, percent_base, summary, url in rows
         )
-        or '<tr><td colspan="4">Находок пока нет</td></tr>'
+        or '<tr><td colspan="7">Находок пока нет</td></tr>'
     )
     return PAGE.format(
         sources=sources,

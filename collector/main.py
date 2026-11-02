@@ -1,60 +1,13 @@
 """Collector: visits every active source once, saves new materials, exits."""
 
-import json
-import urllib.request
-import xml.etree.ElementTree as ET
-from email.utils import parsedate_to_datetime
+import os
+from itertools import islice
 
 import db
+from collector.sources import READERS
 
 SERVICE = "collector"
-MAX_PER_SOURCE = 15
-ATOM = "{http://www.w3.org/2005/Atom}"
-
-
-def fetch(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "desk-research/0.1"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return resp.read()
-
-
-def read_hn(url):
-    for hit in json.loads(fetch(url))["hits"]:
-        link = (
-            hit.get("url") or f"https://news.ycombinator.com/item?id={hit['objectID']}"
-        )
-        yield {
-            "url": link,
-            "title": hit["title"],
-            "text": hit.get("story_text") or "",
-            "published_at": hit["created_at"],
-        }
-
-
-def read_arxiv(url):
-    root = ET.fromstring(fetch(url))
-    for entry in root.iter(f"{ATOM}entry"):
-        yield {
-            "url": entry.findtext(f"{ATOM}id"),
-            "title": " ".join(entry.findtext(f"{ATOM}title").split()),
-            "text": " ".join(entry.findtext(f"{ATOM}summary").split())[:1500],
-            "published_at": entry.findtext(f"{ATOM}published"),
-        }
-
-
-def read_rss(url):
-    root = ET.fromstring(fetch(url))
-    for item in root.iter("item"):
-        pub = item.findtext("pubDate")
-        yield {
-            "url": item.findtext("link").strip(),
-            "title": item.findtext("title").strip(),
-            "text": (item.findtext("description") or "")[:1500],
-            "published_at": parsedate_to_datetime(pub).isoformat() if pub else None,
-        }
-
-
-READERS = {"hn": read_hn, "arxiv": read_arxiv, "rss": read_rss}
+MAX_PER_SOURCE = int(os.environ.get("MAX_PER_SOURCE", "10"))
 
 
 def main():
@@ -68,7 +21,9 @@ def main():
         ).fetchall()
         for source_id, name, kind, url in sources:
             try:
-                items = list(READERS[kind](url))[:MAX_PER_SOURCE]
+                # Stop the generator at the configured limit so HTML pages after
+                # that point are not downloaded unnecessarily.
+                items = list(islice(READERS[kind](url), MAX_PER_SOURCE))
             except Exception as error:
                 # one broken source does not stop the run
                 db.log(SERVICE, f"источник «{name}» недоступен: {error}")
@@ -76,9 +31,10 @@ def main():
             new = 0
             for item in items:
                 row = conn.execute(
-                    """INSERT INTO materials (source_id, run_id, url, title, text, published_at)
-                       VALUES (%s, %s, %s, %s, %s, %s)
-                       ON CONFLICT (url) DO NOTHING RETURNING id""",
+                    """INSERT INTO materials
+                           (source_id, run_id, url, title, text, published_at, content_hash)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT DO NOTHING RETURNING id""",
                     (
                         source_id,
                         run_id,
@@ -86,6 +42,7 @@ def main():
                         item["title"],
                         item["text"],
                         item["published_at"],
+                        item.get("content_hash"),
                     ),
                 ).fetchone()
                 new += row is not None
