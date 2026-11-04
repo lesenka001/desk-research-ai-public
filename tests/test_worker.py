@@ -1,14 +1,17 @@
 import unittest
+from contextlib import nullcontext
+from decimal import Decimal
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from worker.main import (
     ModelResponseError,
+    calculate_derived_findings,
     load_targeting_criteria,
     model_request_body,
     partition_targeting_criteria,
     process_new,
+    save_result,
     validate_answer,
 )
 
@@ -164,16 +167,14 @@ class TargetingCriteriaTests(unittest.TestCase):
         self.assertEqual(candidates, ["income"])
 
     def test_rejects_duplicate_config_ids(self):
-        with TemporaryDirectory(dir=Path(__file__).parent) as directory:
-            path = Path(directory) / "criteria.json"
-            path.write_text(
-                '{"version":1,"criteria":['
-                '{"id":"age","label":"возраст","synonyms":[]},'
-                '{"id":"age","label":"возраст","synonyms":[]}]}' ,
-                encoding="utf-8",
-            )
+        duplicate_config = (
+            '{"version":1,"criteria":['
+            '{"id":"age","label":"возраст","synonyms":[]},'
+            '{"id":"age","label":"возраст","synonyms":[]}]}'
+        )
+        with patch("worker.main.Path.read_text", return_value=duplicate_config):
             with self.assertRaisesRegex(ValueError, "повторяющийся"):
-                load_targeting_criteria(path)
+                load_targeting_criteria("criteria.json")
 
     def test_schema_is_additive_for_calculation_fields(self):
         schema = (Path(__file__).parents[1] / "db" / "schema.sql").read_text(
@@ -359,6 +360,119 @@ class FindingBlockExtractionTests(unittest.TestCase):
             answer, "40% покупали товары. 20% выбирали сайты объявлений."
         )
         self.assertIsNone(rows[1]["parent_finding_index"])
+
+
+class DerivedCalculationTests(unittest.TestCase):
+    @staticmethod
+    def finding(index, value, parent=None, indicator=None, **overrides):
+        finding = {
+            "finding_index": index,
+            "finding_key": f"finding_{index}",
+            "block_index": 1,
+            "block_position": index,
+            "block_title": "Покупали",
+            "parent_finding_index": parent,
+            "topic": "подержанные товары",
+            "indicator_type": "population_share" if parent is None else "conditional_share",
+            "ir_applicability": "direct",
+            "geography": "Россия",
+            "audience": "населения России в возрасте 18+" if parent is None else "покупателей",
+            "indicator": indicator or "покупали подержанные товары",
+            "value": value,
+            "percent_base": "население России 18+" if parent is None else "покупатели",
+            "study_period": None,
+            "behavior_period": "за последние 6 месяцев" if parent is None else None,
+            "base_kind": "targetable_explicit" if parent is None else "conditional",
+            "base_reason": None,
+            "methodology_evidence": None,
+            "targeting_criteria": ["geography", "age"] if parent is None else [],
+            "candidate_criteria": [],
+            "useful_for": "оценка аудитории",
+            "evidence": f"В тексте указано {value}.",
+            "summary": f"{value} респондентов имеют признак.",
+        }
+        finding.update(overrides)
+        return finding
+
+    def test_calculates_control_percentages_and_rounds_only_display(self):
+        rows = calculate_derived_findings(
+            [
+                self.finding(1, "38%"),
+                self.finding(2, "33%", 1, "покупали через сайты объявлений"),
+                self.finding(3, "35%", 1, "руководствовались экономией"),
+                self.finding(4, "21%", 1, "покупали подержанные автомобили"),
+            ]
+        )
+        self.assertEqual(
+            [row["calculated_percent"] for row in rows[1:]],
+            [Decimal("12.54"), Decimal("13.3"), Decimal("7.98")],
+        )
+        self.assertEqual([row["value"] for row in rows], ["38%", "13%", "13%", "8%"])
+        self.assertEqual(rows[1]["calculation_formula"], "38% × 33% = 12,54%")
+        self.assertIn("населения России в возрасте 18+", rows[1]["summary"])
+        self.assertIn("за последние 6 месяцев", rows[1]["summary"])
+        self.assertEqual(rows[1]["source_value"], "33%")
+
+    def test_calculates_multistep_chain(self):
+        rows = calculate_derived_findings(
+            [
+                self.finding(1, "40%"),
+                self.finding(2, "50%", 1, "использовали сайты объявлений"),
+                self.finding(3, "25%", 2, "покупали автомобиль"),
+            ]
+        )
+        self.assertEqual(rows[2]["calculated_percent"], Decimal("5"))
+        self.assertEqual(rows[2]["value"], "5%")
+        self.assertEqual(rows[2]["calculation_formula"], "40% × 50% × 25% = 5%")
+        self.assertEqual(len(rows[2]["calculation_chain"]), 3)
+
+    def test_candidate_root_and_ambiguous_child_are_not_calculated(self):
+        candidate_root = self.finding(1, "38%", candidate_criteria=["income"])
+        ambiguous_child = self.finding(2, "33%", None, "использовали сайты объявлений")
+        rows = calculate_derived_findings([candidate_root, ambiguous_child])
+        self.assertIsNone(rows[0]["calculated_percent"])
+        self.assertFalse(rows[0]["is_derived"])
+        self.assertEqual(rows[1]["value"], "33%")
+        self.assertIsNone(rows[1]["calculation_formula"])
+
+    def test_non_percentage_value_is_not_multiplied(self):
+        rows = calculate_derived_findings(
+            [self.finding(1, "38%"), self.finding(2, "2,3 млн", 1)]
+        )
+        self.assertEqual(rows[1]["value"], "2,3 млн")
+        self.assertIsNone(rows[1]["calculated_percent"])
+
+
+class SavingCalculatedFindingsTests(unittest.TestCase):
+    class Connection:
+        def __init__(self):
+            self.queries = []
+
+        def transaction(self):
+            return nullcontext()
+
+        def execute(self, query, params=None):
+            self.queries.append((query, params))
+            return Rows(rowcount=1)
+
+    def test_save_includes_formula_chain_and_source_values(self):
+        findings = calculate_derived_findings(
+            [
+                DerivedCalculationTests.finding(1, "38%"),
+                DerivedCalculationTests.finding(2, "33%", 1, "использовали сайты объявлений"),
+            ]
+        )
+        conn = self.Connection()
+        save_result(conn, 10, findings)
+        insert_sql, params = next(
+            (query, params) for query, params in conn.queries if "INSERT INTO findings" in query
+        )
+        self.assertIn("calculation_formula", insert_sql)
+        self.assertIn("calculation_chain", insert_sql)
+        self.assertIn("source_value", insert_sql)
+        self.assertEqual(insert_sql.count("%s"), len(params))
+        self.assertIn("38%", str(conn.queries))
+        self.assertIn("12,54%", str(conn.queries))
 
 
 class Rows:

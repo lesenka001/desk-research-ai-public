@@ -6,6 +6,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
 import db
@@ -464,6 +465,125 @@ def value_supported(value, evidence):
     return not tokens or all(token in evidence_numbers for token in tokens)
 
 
+def parse_percent(value):
+    match = re.fullmatch(r"\s*(\d+(?:[.,]\d+)?)\s*%\s*", value or "")
+    if not match:
+        return None
+    try:
+        percent = Decimal(match.group(1).replace(",", "."))
+    except InvalidOperation:
+        return None
+    return percent if Decimal("0") <= percent <= Decimal("100") else None
+
+
+def format_decimal(value):
+    rendered = format(value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered.replace(".", ",")
+
+
+def append_period(summary, period):
+    if not period or normalized(period) in normalized(summary):
+        return summary
+    return f"{summary.rstrip().rstrip('.')} {period}."
+
+
+def derived_summary(finding, root, displayed_value):
+    audience = root.get("audience") or root.get("percent_base") or "респондентов исследования"
+    indicator = finding.get("indicator") or finding.get("summary") or "имеют указанный признак"
+    period = finding.get("behavior_period") or root.get("behavior_period")
+    summary = f"{displayed_value} {audience} {indicator}".strip()
+    return append_period(summary, period)
+
+
+def calculate_derived_findings(findings):
+    """Calculate only unambiguous percentage chains rooted in targetable bases."""
+    calculated = []
+    by_index = {}
+    root_by_index = {}
+
+    for original in findings:
+        finding = dict(original)
+        source_percent = parse_percent(finding.get("value"))
+        finding["source_value"] = finding.get("value")
+        finding["source_percent_base"] = finding.get("percent_base")
+        finding["calculated_percent"] = None
+        finding["calculation_formula"] = None
+        finding["calculation_chain"] = None
+        finding["is_derived"] = False
+
+        parent = by_index.get(finding.get("parent_finding_index"))
+        if parent is None:
+            eligible_root = (
+                source_percent is not None
+                and finding.get("base_kind")
+                in {"targetable_explicit", "targetable_inferred"}
+                and bool(finding.get("targeting_criteria"))
+                and not finding.get("candidate_criteria")
+            )
+            if eligible_root:
+                finding["calculated_percent"] = source_percent
+                finding["calculation_chain"] = [
+                    {
+                        "finding_index": finding["finding_index"],
+                        "value": finding["source_value"],
+                        "percent": format(source_percent, "f"),
+                    }
+                ]
+                root_by_index[finding["finding_index"]] = finding
+            finding["summary"] = append_period(
+                finding["summary"], finding.get("behavior_period")
+            )
+        elif (
+            source_percent is not None
+            and finding.get("base_kind") == "conditional"
+            and parent.get("calculated_percent") is not None
+            and parent.get("calculation_chain")
+        ):
+            exact = (parent["calculated_percent"] * source_percent) / Decimal("100")
+            chain = list(parent["calculation_chain"]) + [
+                {
+                    "finding_index": finding["finding_index"],
+                    "value": finding["source_value"],
+                    "percent": format(source_percent, "f"),
+                }
+            ]
+            root = root_by_index.get(parent["finding_index"], root_by_index.get(parent.get("parent_finding_index")))
+            if root is None:
+                root = next(
+                    (
+                        item
+                        for item in calculated
+                        if item.get("calculation_chain")
+                        and item["finding_index"] == chain[0]["finding_index"]
+                    ),
+                    parent,
+                )
+            displayed = exact.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+            displayed_value = f"{format_decimal(displayed)}%"
+            expression = " × ".join(
+                f"{format_decimal(Decimal(item['percent']))}%" for item in chain
+            )
+            finding["calculated_percent"] = exact
+            finding["calculation_chain"] = chain
+            finding["calculation_formula"] = (
+                f"{expression} = {format_decimal(exact)}%"
+            )
+            finding["value"] = displayed_value
+            finding["summary"] = derived_summary(finding, root, displayed_value)
+            finding["percent_base"] = root.get("audience") or root.get("percent_base")
+            finding["audience"] = root.get("audience") or root.get("percent_base")
+            finding["is_derived"] = True
+            root_by_index[finding["finding_index"]] = root
+
+        calculated.append(finding)
+        by_index[finding["finding_index"]] = finding
+        if finding.get("calculation_chain") and finding["calculation_chain"][0]["finding_index"] == finding["finding_index"]:
+            root_by_index[finding["finding_index"]] = finding
+    return calculated
+
+
 def has_restricted_base(audience, percent_base):
     value = normalized(f"{audience or ''} {percent_base or ''}")
     return any(marker in value for marker in RESTRICTED_AUDIENCE_MARKERS)
@@ -617,15 +737,25 @@ def save_result(conn, material_id, findings):
         for finding in findings:
             conn.execute(
                 """INSERT INTO findings
-                       (material_id, finding_index, topic, indicator_type, ir_applicability, geography,
-                        audience, indicator, value, percent_base, study_period,
-                        useful_for, evidence, summary, model, prompt_version)
+                       (material_id, finding_index, block_index, block_position, block_title,
+                        parent_finding_index, topic, indicator_type, ir_applicability, geography,
+                        audience, indicator, value, percent_base, study_period, behavior_period,
+                        useful_for, evidence, summary, source_value, source_percent_base,
+                        calculated_percent, calculation_formula, calculation_chain, base_kind,
+                        base_reason, methodology_evidence, is_derived, targeting_criteria,
+                        candidate_criteria, model, prompt_version)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                           %s, %s, %s, %s, %s, %s)
+                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                           %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s::jsonb,
+                           %s::jsonb, %s, %s)
                    ON CONFLICT (material_id, prompt_version, finding_index) DO NOTHING""",
                 (
                     material_id,
                     finding["finding_index"],
+                    finding["block_index"],
+                    finding["block_position"],
+                    finding["block_title"],
+                    finding["parent_finding_index"],
                     finding["topic"],
                     finding["indicator_type"],
                     finding["ir_applicability"],
@@ -635,9 +765,23 @@ def save_result(conn, material_id, findings):
                     finding["value"],
                     finding["percent_base"],
                     finding["study_period"],
+                    finding["behavior_period"],
                     finding["useful_for"],
                     finding["evidence"],
                     finding["summary"],
+                    finding["source_value"],
+                    finding["source_percent_base"],
+                    finding["calculated_percent"],
+                    finding["calculation_formula"],
+                    json.dumps(finding["calculation_chain"], ensure_ascii=False)
+                    if finding["calculation_chain"]
+                    else None,
+                    finding["base_kind"],
+                    finding["base_reason"],
+                    finding["methodology_evidence"],
+                    finding["is_derived"],
+                    json.dumps(finding["targeting_criteria"], ensure_ascii=False),
+                    json.dumps(finding["candidate_criteria"], ensure_ascii=False),
                     MODEL,
                     PROMPT_VERSION,
                 ),
@@ -672,7 +816,7 @@ def process_new(conn):
             continue
         try:
             answer = ask_model(source, title, text, published_at)
-            findings = validate_answer(answer, text or "")
+            findings = calculate_derived_findings(validate_answer(answer, text or ""))
         except Exception as error:
             conn.execute(
                 """UPDATE materials
