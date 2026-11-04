@@ -81,11 +81,27 @@ ALTER TABLE findings ADD COLUMN IF NOT EXISTS percent_base TEXT;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS study_period TEXT;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS useful_for TEXT;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS evidence TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS block_index INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS block_position INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS parent_finding_index INTEGER;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS source_value TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS source_percent_base TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS calculated_percent NUMERIC(12, 6);
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS calculation_formula TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS calculation_chain JSONB;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS base_kind TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS base_reason TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS methodology_evidence TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS is_derived BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS targeting_criteria JSONB;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS candidate_criteria JSONB;
 
 CREATE UNIQUE INDEX IF NOT EXISTS materials_content_hash_unique
     ON materials (content_hash) WHERE content_hash IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS findings_material_prompt_position_unique
     ON findings (material_id, prompt_version, finding_index);
+CREATE INDEX IF NOT EXISTS findings_material_prompt_block_position_idx
+    ON findings (material_id, prompt_version, block_index, block_position);
 
 -- the bot marks a finding when it has been sent to subscribers
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;

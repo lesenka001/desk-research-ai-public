@@ -6,6 +6,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import db
 
@@ -19,6 +20,7 @@ MAX_TEXT_CHARS = int(os.environ.get("MAX_TEXT_CHARS", "12000"))
 MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "6000"))
 WORKER_BATCH_SIZE = int(os.environ.get("WORKER_BATCH_SIZE", "20"))
 REPROCESS_OLD = os.environ.get("REPROCESS_OLD", "0").lower() in {"1", "true", "yes"}
+TARGETING_CRITERIA_PATH = Path(__file__).with_name("targeting_criteria.json")
 
 INDICATOR_TYPES = {
     "population_share",
@@ -29,6 +31,52 @@ INDICATOR_TYPES = {
 }
 
 IR_APPLICABILITY_VALUES = {"direct", "indirect", "context_only"}
+
+
+def load_targeting_criteria(path=TARGETING_CRITERIA_PATH):
+    """Load the explicit allow-list used for targetable denominator checks."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if data.get("version") != 1 or not isinstance(data.get("criteria"), list):
+        raise ValueError("некорректная конфигурация таргетируемых критериев")
+
+    criteria = {}
+    for item in data["criteria"]:
+        if not isinstance(item, dict):
+            raise ValueError("критерий должен быть объектом")
+        criterion_id = nullable_text(item.get("id"), 100)
+        label = nullable_text(item.get("label"), 200)
+        synonyms = item.get("synonyms")
+        if not criterion_id or not label or not isinstance(synonyms, list):
+            raise ValueError("у критерия обязательны id, label и synonyms")
+        if criterion_id in criteria:
+            raise ValueError(f"повторяющийся критерий: {criterion_id}")
+        clean_synonyms = [
+            synonym
+            for value in synonyms
+            if (synonym := nullable_text(value, 200))
+        ]
+        criteria[criterion_id] = {
+            "id": criterion_id,
+            "label": label,
+            "synonyms": clean_synonyms,
+        }
+    if not criteria:
+        raise ValueError("список таргетируемых критериев пуст")
+    return criteria
+
+
+def partition_targeting_criteria(criterion_ids, criteria=None):
+    """Separate approved criteria from candidates without auto-approving them."""
+    approved_ids = set((criteria or load_targeting_criteria()).keys())
+    requested = []
+    for value in criterion_ids or []:
+        criterion_id = nullable_text(value, 100)
+        if criterion_id and criterion_id not in requested:
+            requested.append(criterion_id)
+    return (
+        [value for value in requested if value in approved_ids],
+        [value for value in requested if value not in approved_ids],
+    )
 
 RESTRICTED_AUDIENCE_MARKERS = (
     "пользовател",

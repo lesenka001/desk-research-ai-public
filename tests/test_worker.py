@@ -1,7 +1,15 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from worker.main import ModelResponseError, process_new, validate_answer
+from worker.main import (
+    ModelResponseError,
+    load_targeting_criteria,
+    partition_targeting_criteria,
+    process_new,
+    validate_answer,
+)
 
 
 TEXT = (
@@ -137,6 +145,52 @@ class WorkerValidationTests(unittest.TestCase):
 
     def test_irrelevant_material_has_no_findings(self):
         self.assertEqual(validate_answer({"relevant": False, "findings": []}, TEXT), [])
+
+
+class TargetingCriteriaTests(unittest.TestCase):
+    def test_loads_explicit_targeting_criteria(self):
+        criteria = load_targeting_criteria()
+        self.assertIn("geography", criteria)
+        self.assertIn("gender", criteria)
+        self.assertIn("dog_ownership", criteria)
+        self.assertIn("business_size", criteria)
+
+    def test_unknown_criterion_is_candidate_not_approved(self):
+        approved, candidates = partition_targeting_criteria(
+            ["age", "income", "age"]
+        )
+        self.assertEqual(approved, ["age"])
+        self.assertEqual(candidates, ["income"])
+
+    def test_rejects_duplicate_config_ids(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "criteria.json"
+            path.write_text(
+                '{"version":1,"criteria":['
+                '{"id":"age","label":"возраст","synonyms":[]},'
+                '{"id":"age","label":"возраст","synonyms":[]}]}' ,
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "повторяющийся"):
+                load_targeting_criteria(path)
+
+    def test_schema_is_additive_for_calculation_fields(self):
+        schema = (Path(__file__).parents[1] / "db" / "schema.sql").read_text(
+            encoding="utf-8"
+        )
+        for column in (
+            "block_index",
+            "block_position",
+            "parent_finding_index",
+            "calculated_percent",
+            "calculation_chain",
+            "targeting_criteria",
+            "candidate_criteria",
+        ):
+            self.assertIn(
+                f"ADD COLUMN IF NOT EXISTS {column}", schema
+            )
+        self.assertNotIn("DROP TABLE", schema.upper())
 
 
 class Rows:
