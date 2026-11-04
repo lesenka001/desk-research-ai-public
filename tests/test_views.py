@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timezone
 
-from bot.main import finding_lines
+from bot.main import finding_lines, group_findings
 from web.main import render
 
 
@@ -42,6 +42,62 @@ class WebConnection:
 
 
 class ViewTests(unittest.TestCase):
+    def test_mini_app_groups_one_material_into_ordered_blocks(self):
+        findings = [
+            {
+                "id": 3,
+                "material_id": 10,
+                "title": "Подержанные товары",
+                "url": "https://example.org/study",
+                "source": "НАФИ",
+                "date": "2026-11-04T10:00:00Z",
+                "block_index": 2,
+                "block_position": 1,
+                "block_title": "Продавали",
+                "value": "30%",
+            },
+            {
+                "id": 2,
+                "material_id": 10,
+                "title": "Подержанные товары",
+                "url": "https://example.org/study",
+                "source": "НАФИ",
+                "date": "2026-11-04T10:00:00Z",
+                "block_index": 1,
+                "block_position": 2,
+                "block_title": "Покупали",
+                "value": "13%",
+            },
+            {
+                "id": 1,
+                "material_id": 10,
+                "title": "Подержанные товары",
+                "url": "https://example.org/study",
+                "source": "НАФИ",
+                "date": "2026-11-04T10:00:00Z",
+                "block_index": 1,
+                "block_position": 1,
+                "block_title": "Покупали",
+                "value": "38%",
+            },
+        ]
+        groups = group_findings(findings)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual([block["block_title"] for block in groups[0]["blocks"]], ["Покупали", "Продавали"])
+        self.assertEqual(
+            [item["value"] for item in groups[0]["blocks"][0]["findings"]],
+            ["38%", "13%"],
+        )
+
+    def test_mini_app_template_contains_calculation_audit(self):
+        template = (
+            __import__("pathlib").Path(__file__).parents[1] / "bot" / "template.html"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Расчёт от таргетируемой базы", template)
+        self.assertIn("calculation_formula", template)
+        self.assertIn("candidate_criteria", template)
+        self.assertIn("finding-block", template)
+
     def test_web_renders_statistical_fields(self):
         page = render(WebConnection())
         self.assertIn("Навигатор достижимости ЦА", page)

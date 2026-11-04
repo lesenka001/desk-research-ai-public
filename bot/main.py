@@ -282,21 +282,79 @@ def iso(moment):
     )
 
 
+def group_findings(findings):
+    """Group a flat feed by source page and then by calculation block."""
+    materials = {}
+    for finding in sorted(
+        findings,
+        key=lambda item: (
+            item.get("material_id") or 0,
+            item.get("block_index") or 1,
+            item.get("block_position") or item.get("id") or 0,
+        ),
+    ):
+        material_id = finding.get("material_id")
+        material = materials.setdefault(
+            material_id,
+            {
+                "material_id": material_id,
+                "title": finding.get("title"),
+                "url": finding.get("url"),
+                "source": finding.get("source"),
+                "date": finding.get("date"),
+                "blocks": {},
+            },
+        )
+        block_index = finding.get("block_index") or 1
+        block = material["blocks"].setdefault(
+            block_index,
+            {
+                "block_index": block_index,
+                "block_title": finding.get("block_title") or "Находки",
+                "findings": [],
+            },
+        )
+        block["findings"].append(finding)
+
+    grouped = []
+    for material in materials.values():
+        material["blocks"] = list(material["blocks"].values())
+        grouped.append(material)
+    return grouped
+
+
 def page_data(conn):
     fields = (
         "id",
         "material_id",
+        "finding_index",
         "summary",
         "reason",
         "value",
+        "block_index",
+        "block_position",
+        "block_title",
+        "parent_finding_index",
         "indicator_type",
         "ir_applicability",
         "audience",
         "percent_base",
         "geography",
         "study_period",
+        "behavior_period",
         "useful_for",
         "evidence",
+        "source_value",
+        "source_percent_base",
+        "calculated_percent",
+        "calculation_formula",
+        "calculation_chain",
+        "base_kind",
+        "base_reason",
+        "methodology_evidence",
+        "is_derived",
+        "targeting_criteria",
+        "candidate_criteria",
         "title",
         "url",
         "date",
@@ -310,19 +368,26 @@ def page_data(conn):
     )
     findings = []
     for row in conn.execute(
-        "SELECT f.id, m.id, f.summary, f.topic, f.value, f.indicator_type, f.ir_applicability, f.audience,"
-        " f.percent_base, f.geography, f.study_period, f.useful_for, f.evidence,"
+        "SELECT f.id, m.id, f.finding_index, f.summary, f.topic, f.value, f.block_index, f.block_position,"
+        " f.block_title, f.parent_finding_index, f.indicator_type, f.ir_applicability, f.audience,"
+        " f.percent_base, f.geography, f.study_period, f.behavior_period, f.useful_for, f.evidence,"
+        " f.source_value, f.source_percent_base, f.calculated_percent, f.calculation_formula,"
+        " f.calculation_chain, f.base_kind, f.base_reason, f.methodology_evidence, f.is_derived,"
+        " f.targeting_criteria, f.candidate_criteria,"
         " m.title, m.url, coalesce(m.published_at, m.collected_at), m.run_id,"
         " s.id, s.name, s.url, left(m.text, 600), f.sent_at, f.model"
         " FROM findings f JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id"
         " WHERE m.processed_prompt_version IS NULL OR f.prompt_version = m.processed_prompt_version"
-        " ORDER BY f.id DESC LIMIT 300"
+        " ORDER BY coalesce(m.published_at, m.collected_at) DESC, m.id DESC,"
+        " f.block_index, f.block_position, f.id LIMIT 300"
     ):
         finding = dict(zip(fields, row))
         finding["date"], finding["sent_at"] = (
             iso(finding["date"]),
             iso(finding["sent_at"]),
         )
+        if finding["calculated_percent"] is not None:
+            finding["calculated_percent"] = str(finding["calculated_percent"])
         findings.append(finding)
 
     run = conn.execute(
@@ -384,6 +449,7 @@ def page_data(conn):
         "run": run_info,
         "sources": sources,
         "findings": findings,
+        "material_groups": group_findings(findings),
     }
 
 

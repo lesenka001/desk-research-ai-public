@@ -47,7 +47,17 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 
 /* feed */
 .feed { list-style: none; margin: 0; padding: 12px 16px 24px; display: flex; flex-direction: column; gap: 10px; }
+.material { border: 1px solid var(--rule-strong); border-radius: var(--corner-lg); background: var(--surface); overflow: hidden; }
+.material-head { padding: 13px 14px; border-bottom: 1px solid var(--rule); }
+.material-head p { margin: 6px 0 0; font-weight: 650; line-height: 1.35; }
+.finding-block { padding: 12px; }
+.finding-block + .finding-block { border-top: 1px solid var(--rule); }
+.block-title { display: flex; justify-content: space-between; gap: 8px; margin: 0 2px 8px; }
+.block-findings { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
 .item { width: 100%; display: block; border: 1px solid var(--rule); border-radius: var(--corner-lg); background: var(--surface); padding: 14px 14px 13px; transition: border-color .15s ease; }
+.material .item { background: var(--bg); border-radius: var(--corner-md); }
+.item.base-finding { border-color: var(--rule-strong); }
+.calculated { font-family: var(--family-mono); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--fg-faint); }
 .item:hover, .item:focus-visible { border-color: var(--rule-strong); }
 .item:active { background: var(--surface-2); }
 .line1 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 14px; color: var(--fg-dim); }
@@ -213,15 +223,31 @@ function renderFeed() {
   if (!list.length) {
     return `<div class="empty"><p>По этим фильтрам находок нет.</p><button class="reset" data-reset>Сбросить фильтры</button></div>`;
   }
-  return `<ul class="feed">${list.map((f) => `
-    <li><button class="item" data-open="${f.id}">
-      <span class="line1">
-        ${f.run_id === lastRun ? `<span class="new" title="из последнего прогона"></span>` : ""}
-        <span class="src">${esc(f.source)}</span><span>· ${day(f.date)}</span>
-        ${tags(f).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}
-      </span>
-      <p>${f.value ? `<strong>${esc(f.value)}</strong> · ` : ""}${esc(f.summary)}</p>
-    </button></li>`).join("")}</ul>`;
+  const materials = new Map();
+  list.forEach((f) => {
+    if (!materials.has(f.material_id)) materials.set(f.material_id, { finding: f, blocks: new Map() });
+    const material = materials.get(f.material_id);
+    const blockKey = f.block_index || 1;
+    if (!material.blocks.has(blockKey)) material.blocks.set(blockKey, { title: f.block_title || "Находки", findings: [] });
+    material.blocks.get(blockKey).findings.push(f);
+  });
+  return `<ul class="feed">${[...materials.values()].map(({ finding, blocks }) => `
+    <li class="material">
+      <div class="material-head">
+        <span class="line1">${finding.run_id === lastRun ? `<span class="new" title="из последнего прогона"></span>` : ""}<span class="src">${esc(finding.source)}</span><span>· ${day(finding.date)}</span></span>
+        <p>${esc(finding.title)}</p>
+      </div>
+      ${[...blocks.values()].map((block) => `
+        <section class="finding-block">
+          <div class="block-title"><span class="label">${esc(block.title)}</span><span class="num">${block.findings.length}</span></div>
+          <ul class="block-findings">${block.findings
+            .sort((a, b) => (a.block_position || 0) - (b.block_position || 0))
+            .map((f) => `<li><button class="item ${f.parent_finding_index == null ? "base-finding" : ""}" data-open="${f.id}">
+              <span class="line1">${f.is_derived ? `<span class="calculated">пересчитано</span>` : ""}${tags(f).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</span>
+              <p>${f.value && !f.summary.includes(f.value) ? `<strong>${esc(f.value)}</strong> · ` : ""}${esc(f.summary)}</p>
+            </button></li>`).join("")}</ul>
+        </section>`).join("")}
+    </li>`).join("")}</ul>`;
 }
 
 /* ---------- one finding ---------- */
@@ -230,6 +256,7 @@ function renderDetail(f) {
   const at = list.findIndex((x) => x.id === f.id);
   const same = f.summary.trim() === f.title.trim();
   const text = f.text ? esc(f.text) + (f.text.length >= 600 ? "…" : "") : "";
+  const chain = (f.calculation_chain || []).map((step) => findings.find((item) => item.material_id === f.material_id && item.id !== null && item.finding_index === step.finding_index)).filter(Boolean);
   return `<article class="detail">
     <div class="bar">
       ${inTelegram ? `<span class="label">${esc(f.source)}</span>` : `<button class="back" data-back>← Лента</button>`}
@@ -250,9 +277,23 @@ function renderDetail(f) {
       ${f.percent_base ? `<p class="key">База: ${esc(f.percent_base)}</p>` : ""}
       ${f.geography ? `<p class="key">География: ${esc(f.geography)}</p>` : ""}
       ${f.study_period ? `<p class="key">Период исследования: ${esc(f.study_period)}</p>` : ""}
+      ${f.behavior_period ? `<p class="key">Период/частота поведения: ${esc(f.behavior_period)}</p>` : ""}
       ${f.useful_for ? `<p>${esc(f.useful_for)}</p>` : ""}
       ${f.evidence ? `<p class="excerpt">Подтверждение: «${esc(f.evidence)}»</p>` : ""}
     </div>
+    ${f.is_derived ? `<section class="trace">
+      <span class="label">Расчёт от таргетируемой базы</span>
+      <h3>${esc(f.calculation_formula || "")}</h3>
+      <div class="rec">
+        <p class="key">Исходная условная доля: ${esc(f.source_value || "—")}</p>
+        ${f.source_percent_base ? `<p class="key">Исходная база: ${esc(f.source_percent_base)}</p>` : ""}
+        ${f.calculated_percent ? `<p class="key">Точный результат: ${esc(f.calculated_percent)}%</p>` : ""}
+      </div>
+      ${chain.map((item) => `<div class="rec"><span class="label">Шаг ${item.block_position}</span><p>${esc(item.source_value || item.value || "—")} · ${esc(item.summary)}</p>${item.evidence ? `<p class="excerpt">«${esc(item.evidence)}»</p>` : ""}</div>`).join("")}
+      ${f.base_reason ? `<p class="say">Допущение о базе: ${esc(f.base_reason)}</p>` : ""}
+      ${f.methodology_evidence ? `<p class="excerpt">Методология: «${esc(f.methodology_evidence)}»</p>` : ""}
+    </section>` : ""}
+    ${(f.candidate_criteria || []).length ? `<div class="rec"><span class="label">Кандидат в таргетируемые критерии</span><p>${f.candidate_criteria.map(esc).join(", ")}</p><p class="key">Не используется в автоматическом пересчёте до подтверждения.</p></div>` : ""}
     ${text ? `<p class="excerpt">${text}</p>` : ""}
     ${tags(f).length ? `<div class="tags">${tags(f).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div>` : ""}
     ${inTelegram ? "" : `<button class="btn main" data-url="${esc(f.url)}">Открыть материал</button>`}
