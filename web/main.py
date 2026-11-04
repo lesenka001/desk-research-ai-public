@@ -28,6 +28,9 @@ PAGE = """<!doctype html>
   th {{ font-weight: 600; background: #ecebe5; }}
   a {{ color: #1a1a1a; }}
   .tag {{ background: #e8f5c8; padding: 1px 6px; white-space: nowrap; }}
+  .material-row td {{ background: #1a1a1a; color: #fff; padding-top: 12px; padding-bottom: 12px; }}
+  .material-row a {{ color: #fff; font-weight: 700; }}
+  .block-row td {{ background: #dddcd5; font-weight: 700; }}
 </style></head>
 <body><main>
 <h1>Навигатор достижимости ЦА</h1>
@@ -54,7 +57,7 @@ PAGE = """<!doctype html>
 </main></body></html>"""
 
 ROW = """<tr><td>{date}</td><td>{source}</td><td>{kind}</td><td>{applicability}</td><td>{value}</td>
-<td>{audience}</td><td><a href="{url}" target="_blank">{summary}</a></td></tr>"""
+<td>{audience}</td><td>{summary}{calculation}</td></tr>"""
 
 TYPE_LABELS = {
     "population_share": "доля аудитории",
@@ -80,17 +83,53 @@ def render(conn):
     ).fetchone()
     last_run = f"{last[1]:%d.%m %H:%M} UTC, {last[0]}" if last else "еще не было"
     rows = conn.execute(
-        """SELECT m.published_at, s.name, f.indicator_type, f.ir_applicability, f.value,
-                  f.audience, f.percent_base, f.summary, m.url
+        """SELECT m.published_at, s.name, m.id, m.title, m.url,
+                  f.block_index, f.block_position, f.block_title,
+                  f.indicator_type, f.ir_applicability, f.value,
+                  f.audience, f.percent_base, f.summary, f.calculation_formula
            FROM findings f
            JOIN materials m ON m.id = f.material_id
            JOIN sources s ON s.id = m.source_id
            WHERE m.processed_prompt_version IS NULL
               OR f.prompt_version = m.processed_prompt_version
-           ORDER BY m.published_at DESC NULLS LAST LIMIT 100"""
+           ORDER BY m.published_at DESC NULLS LAST, m.id DESC,
+                    f.block_index, f.block_position, f.id LIMIT 100"""
     ).fetchall()
-    rows_html = (
-        "\n".join(
+    rendered_rows = []
+    current_material = None
+    current_block = None
+    for (
+        published,
+        source,
+        material_id,
+        title,
+        url,
+        block_index,
+        block_position,
+        block_title,
+        indicator_type,
+        ir_applicability,
+        value,
+        audience,
+        percent_base,
+        summary,
+        calculation_formula,
+    ) in rows:
+        if material_id != current_material:
+            rendered_rows.append(
+                '<tr class="material-row"><td colspan="7">'
+                f'<a href="{html.escape(url, quote=True)}" target="_blank">{html.escape(title)}</a>'
+                f' · {html.escape(source)}</td></tr>'
+            )
+            current_material = material_id
+            current_block = None
+        block_key = (material_id, block_index or 1)
+        if block_key != current_block:
+            rendered_rows.append(
+                f'<tr class="block-row"><td colspan="7">{html.escape(block_title or "Находки")}</td></tr>'
+            )
+            current_block = block_key
+        rendered_rows.append(
             ROW.format(
                 date=f"{published:%d.%m %H:%M}" if published else "",
                 source=html.escape(source),
@@ -109,12 +148,14 @@ def render(conn):
                 )
                 or "—",
                 summary=html.escape(summary),
-                url=html.escape(url, quote=True),
+                calculation=(
+                    f'<div class="muted">Расчёт: {html.escape(calculation_formula)}</div>'
+                    if calculation_formula
+                    else ""
+                ),
             )
-            for published, source, indicator_type, ir_applicability, value, audience, percent_base, summary, url in rows
         )
-        or '<tr><td colspan="7">Находок пока нет</td></tr>'
-    )
+    rows_html = "\n".join(rendered_rows) or '<tr><td colspan="7">Находок пока нет</td></tr>'
     return PAGE.format(
         sources=sources,
         materials=materials,

@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timezone
 
-from bot.main import finding_lines, group_findings
+from bot.main import build_digest, finding_lines, group_findings
 from web.main import render
 
 
@@ -28,13 +28,19 @@ class WebConnection:
                     (
                         datetime(2026, 11, 2, tzinfo=timezone.utc),
                         "ФОМ",
+                        10,
+                        "Исследование кофе",
+                        "https://example.org/study",
+                        1,
+                        1,
+                        "Покупали",
                         "conditional_share",
                         "direct",
                         "22%",
                         "покупатели кофе",
                         "покупатели кофе",
                         "22% покупателей выбирают растворимый кофе.",
-                        "https://example.org/study",
+                        None,
                     )
                 ]
             )
@@ -42,6 +48,55 @@ class WebConnection:
 
 
 class ViewTests(unittest.TestCase):
+    def test_telegram_digest_groups_material_and_keeps_whole_blocks(self):
+        rows = [
+            {
+                "id": 1,
+                "material_id": 10,
+                "title": "Подержанные товары",
+                "url": "https://example.org/study",
+                "source": "НАФИ",
+                "block_index": 1,
+                "block_position": 1,
+                "block_title": "Покупали",
+                "parent_finding_index": None,
+                "summary": "38% россиян 18+ покупали подержанные товары.",
+                "value": "38%",
+            },
+            {
+                "id": 2,
+                "material_id": 10,
+                "title": "Подержанные товары",
+                "url": "https://example.org/study",
+                "source": "НАФИ",
+                "block_index": 1,
+                "block_position": 2,
+                "block_title": "Покупали",
+                "parent_finding_index": 1,
+                "summary": "13% россиян 18+ использовали сайты объявлений.",
+                "value": "13%",
+            },
+            {
+                "id": 3,
+                "material_id": 10,
+                "title": "Подержанные товары",
+                "url": "https://example.org/study",
+                "source": "НАФИ",
+                "block_index": 2,
+                "block_position": 1,
+                "block_title": "Продавали",
+                "parent_finding_index": None,
+                "summary": "30% россиян 18+ продавали подержанные товары. " + "очень " * 100,
+                "value": "30%",
+            },
+        ]
+        first_block_only, included = build_digest(rows, [("НАФИ", 3)], limit=450)
+        self.assertEqual(included, [1, 2])
+        self.assertIn("Покупали", first_block_only)
+        self.assertNotIn("Продавали", first_block_only)
+        self.assertEqual(first_block_only.count("https://example.org/study"), 1)
+        self.assertIn("Еще 1 находок", first_block_only)
+
     def test_mini_app_groups_one_material_into_ordered_blocks(self):
         findings = [
             {
@@ -104,6 +159,8 @@ class ViewTests(unittest.TestCase):
         self.assertIn("доля в подгруппе", page)
         self.assertIn("покупатели кофе", page)
         self.assertIn("22%", page)
+        self.assertIn("Исследование кофе", page)
+        self.assertIn("Покупали", page)
 
     def test_telegram_line_contains_audience_and_base(self):
         lines = finding_lines(

@@ -23,6 +23,7 @@ SERVICE = "bot"
 HERE = Path(__file__).resolve().parent
 SEND_EVERY_SECONDS = 60
 LATEST = 5  # findings listed in the summary, the rest are in the feed
+TELEGRAM_DIGEST_LIMIT = 3800
 
 COMMANDS = [
     {"command": "start", "description": "подписаться на новые исследования"},
@@ -97,6 +98,78 @@ def finding_lines(rows):
     return lines
 
 
+def digest_finding_line(finding):
+    summary = finding["summary"]
+    value = finding.get("value")
+    headline = f"{value} — {summary}" if value and value not in summary else summary
+    marker = " ↳" if finding.get("parent_finding_index") is not None else ""
+    return f"•{marker} {html.escape(headline)}"
+
+
+def build_digest(rows, source_counts=None, limit=TELEGRAM_DIGEST_LIMIT):
+    """Build a Telegram digest without splitting a semantic finding block."""
+    source_counts = source_counts or []
+    heading = f"<b>Новых статистических находок: {len(rows)}</b>"
+    if source_counts:
+        heading += "\n" + " · ".join(
+            f"{html.escape(name)} {count}" for name, count in source_counts
+        )
+
+    materials = {}
+    for finding in rows:
+        material = materials.setdefault(
+            finding["material_id"],
+            {
+                "title": finding["title"],
+                "url": finding["url"],
+                "source": finding["source"],
+                "blocks": {},
+            },
+        )
+        block_index = finding.get("block_index") or 1
+        block = material["blocks"].setdefault(
+            block_index,
+            {
+                "title": finding.get("block_title") or "Находки",
+                "findings": [],
+            },
+        )
+        block["findings"].append(finding)
+
+    text = heading
+    included_ids = []
+    omitted = 0
+    for material in materials.values():
+        material_header = (
+            f'\n\n<b><a href="{html.escape(material["url"], quote=True)}">'
+            f'{html.escape(material["title"])}</a></b>\n{html.escape(material["source"])}'
+        )
+        header_added = False
+        for block in material["blocks"].values():
+            block_findings = sorted(
+                block["findings"],
+                key=lambda item: (item.get("block_position") or item.get("id") or 0),
+            )
+            block_text = (
+                f'\n\n<b>{html.escape(block["title"])}</b>\n'
+                + "\n".join(digest_finding_line(item) for item in block_findings)
+            )
+            candidate = text + (material_header if not header_added else "") + block_text
+            if len(candidate) > limit:
+                omitted += len(block_findings)
+                continue
+            text = candidate
+            header_added = True
+            included_ids.extend(item["id"] for item in block_findings)
+
+    omitted += len(rows) - len(included_ids) - omitted
+    if omitted:
+        footer = f"\n\nЕще {omitted} находок — в ленте."
+        if len(text) + len(footer) <= limit:
+            text += footer
+    return text, included_ids
+
+
 def setup(conn):
     """Menu commands, the permanent page button, and a starting point for sending."""
     api("setMyCommands", {"commands": COMMANDS})
@@ -152,18 +225,31 @@ def send_new(conn):
         " WHERE f.id = ANY(%s) GROUP BY s.name ORDER BY count(*) DESC, s.name",
         (ids,),
     ).fetchall()
-    latest = conn.execute(
-        "SELECT f.summary, f.value, f.audience, f.percent_base, f.ir_applicability, m.url, s.name FROM findings f"
+    digest_rows = conn.execute(
+        "SELECT f.id, m.id, m.title, m.url, s.name, f.block_index, f.block_position,"
+        " f.block_title, f.parent_finding_index, f.summary, f.value, f.is_derived FROM findings f"
         " JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id"
-        " WHERE f.id = ANY(%s) ORDER BY f.id DESC LIMIT %s",
-        (ids, LATEST),
+        " WHERE f.id = ANY(%s) ORDER BY coalesce(m.published_at, m.collected_at) DESC,"
+        " m.id DESC, f.block_index, f.block_position, f.id",
+        (ids,),
     ).fetchall()
-    text = f"<b>Новых статистических находок: {len(ids)}</b>\n" + " · ".join(
-        f"{html.escape(name)} {count}" for name, count in sources
+    digest_fields = (
+        "id",
+        "material_id",
+        "title",
+        "url",
+        "source",
+        "block_index",
+        "block_position",
+        "block_title",
+        "parent_finding_index",
+        "summary",
+        "value",
+        "is_derived",
     )
-    text += "\n\nСвежие:\n\n" + "\n\n".join(finding_lines(latest))
-    if len(ids) > LATEST:
-        text += f"\n\nЕще {len(ids) - LATEST} в ленте."
+    text, included_ids = build_digest(
+        [dict(zip(digest_fields, row)) for row in digest_rows], sources
+    )
     run_id = db.start_run(conn, SERVICE)
     delivered = 0
     for chat_id in subscribers:
@@ -175,7 +261,13 @@ def send_new(conn):
                 conn.execute("DELETE FROM subscribers WHERE chat_id = %s", (chat_id,))
             db.log(SERVICE, f"чат {chat_id}: не доставлено, ответ {error.code}")
     conn.execute("UPDATE findings SET sent_at = now() WHERE id = ANY(%s)", (ids,))
-    db.finish_run(conn, SERVICE, run_id, len(ids), f"сводка по {len(ids)} находкам, получили {delivered} из {len(subscribers)}")
+    db.finish_run(
+        conn,
+        SERVICE,
+        run_id,
+        len(ids),
+        f"сводка: показано {len(included_ids)} из {len(ids)} находок, получили {delivered} из {len(subscribers)}",
+    )
 
 
 def status_text(conn):
