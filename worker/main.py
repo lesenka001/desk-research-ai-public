@@ -44,12 +44,9 @@ REPROCESS_MATERIAL_IDS = parse_material_ids(os.environ.get("REPROCESS_MATERIAL_I
 INDICATOR_TYPES = {
     "population_share",
     "conditional_share",
-    "absolute_count",
-    "market_metric",
-    "other",
 }
 
-IR_APPLICABILITY_VALUES = {"direct", "indirect", "context_only"}
+IR_APPLICABILITY_VALUES = {"direct", "indirect"}
 
 
 def load_targeting_criteria(path=TARGETING_CRITERIA_PATH):
@@ -119,6 +116,46 @@ RESTRICTED_AUDIENCE_MARKERS = (
     "пациент",
 )
 
+HUMAN_AUDIENCE_MARKERS = (
+    "населени",
+    "россиян",
+    "жител",
+    "граждан",
+    "респондент",
+    "опрошенн",
+    "участник",
+    "человек",
+    "людей",
+    "мужчин",
+    "женщин",
+    "девуш",
+    "юнош",
+    "детей",
+    "подрост",
+    "молодеж",
+    "пенсионер",
+    "родител",
+    "матер",
+    "мам",
+    "отц",
+    "потребител",
+    "домохозяйств",
+    "пользовател",
+    "покупател",
+    "клиент",
+    "владельц",
+    "продавц",
+    "сотрудник",
+    "работник",
+    "специалист",
+    "руководител",
+    "представител",
+    "директор",
+    "менеджер",
+    "предпринимател",
+    "пациент",
+)
+
 PROMPT = """Ты отбираешь проверяемые статистические находки для предварительной оценки достижимости целевых аудиторий онлайн-опросов.
 
 Утвержденные таргетируемые критерии (id: название):
@@ -140,8 +177,8 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
       "block_title": "короткое название смыслового блока",
       "parent_key": "finding_key непосредственной родительской находки или null",
       "topic": "короткая тема исследования",
-      "indicator_type": "population_share | conditional_share | absolute_count | market_metric | other",
-      "ir_applicability": "direct | indirect | context_only",
+      "indicator_type": "population_share | conditional_share",
+      "ir_applicability": "direct | indirect",
       "geography": "география исследования или null",
       "audience": "аудитория, к которой относится показатель, или null",
       "indicator": "что именно измерено, или null",
@@ -161,7 +198,9 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
 }}
 
 Правила:
-- Материал релевантен, если содержит статистику о населении, потребителях, работниках, организациях, поведении, пользовании товарами/услугами или характеристиках рынка, потенциально полезную для оценки ЦА.
+- Материал релевантен, только если содержит выраженную в процентах долю людей с каким-либо признаком. Подходят фактическое поведение, пользование, потребление, покупка, продажа, владение, знание, намерение, мнение, отношение и любая другая процентная характеристика аудитории.
+- Знаменателем всегда должны быть люди: население, респонденты, пользователи, покупатели, родители, сотрудники, руководители, представители компаний или другая явно названная группа людей. B2B-аудитории допустимы.
+- Не извлекай абсолютные количества, объем или долю рынка, долю заказов/продаж/выручки/трафика, средний чек, цены, темпы изменения и прогнозы рыночных или операционных показателей. Процент, знаменателем которого являются не люди, не является находкой.
 - Один материал может дать от 0 до {max_findings} находок. Не дублируй один показатель разными формулировками.
 - Сначала раздели находки одной страницы на смысловые блоки. В каждом блоке первая находка — базовая доля, остальные — уточнения внутри аудитории предыдущей находки.
 - finding_key уникален внутри материала. parent_key указывает на непосредственную родительскую находку того же блока. У базовой находки parent_key=null.
@@ -169,12 +208,8 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
 - Базовую находку каждого блока ставь раньше дочерних. Не связывай показатели, если вложенность знаменателей неоднозначна.
 - population_share — только доля от всего населения либо широкой демографической базы, заданной лишь географией, полом или возрастом.
 - conditional_share — любая доля внутри группы, уже отобранной по поведению, пользованию, покупке, владению, профессии, заболеванию или характеристике организации. Доли среди пользователей, покупателей, продавцов, клиентов, владельцев и работников всегда conditional_share, даже если они составляют всю выборку исследования.
-- absolute_count — число людей, организаций или объектов.
-- market_metric — объем рынка, число заказов, оборот, средний чек, темп роста и подобные рыночные показатели. Не представляй их как распространенность ЦА.
-- Если тип не подходит, используй other.
-- ir_applicability=direct, только если показатель непосредственно является долей людей/организаций с нужным признаком относительно ясно указанной базы.
+- ir_applicability=direct, только если показатель непосредственно является долей людей с нужным признаком относительно ясно указанной базы.
 - ir_applicability=indirect для отношения, намерения, частоты или связанного признака, который лишь помогает косвенно оценить ЦА.
-- ir_applicability=context_only для объема рынка, заказов, оборота, среднего чека и прочего контекста, из которого нельзя получить долю ЦА. Любой market_metric должен иметь context_only.
 - На этом этапе не вычисляй итоговые проценты и не объединяй доли: извлеки исходные значения и точные связи parent_key. Арифметику выполнит программа после проверки цитат.
 - Перед заполнением percent_base проверь не только абзац с показателем, но и описание выборки/методологии. Укажи точную аудиторию, относительно которой посчитан процент. Для исследования на специальной выборке эта выборка является базой. Если показатель рассчитан на еще более узкой подгруппе, укажи именно ее. Копируй percent_base дословным компактным фрагментом исходного текста; если такого фрагмента нет или база достоверно не определяется, оставь null.
 - Географию, аудиторию, период и базу указывай только если они явно следуют из текста. Иначе null.
@@ -183,7 +218,7 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
 - conditional используй для доли внутри поведенческой или иной нетаргетируемой группы. unknown — если база неясна.
 - В targeting_criteria перечисли id всех критериев, образующих базу. Новый возможный критерий дай коротким английским id: программа сохранит его кандидатом, но не одобрит автоматически.
 - behavior_period обязателен, когда в тексте указаны период, срок или частота покупки, продажи или пользования. Не заменяй им study_period исследования.
-- evidence должна быть дословным фрагментом переданного текста. Если числового значения нет, value и evidence могут быть null.
+- value обязано быть процентом от 0% до 100%. evidence должна быть дословным фрагментом переданного текста и подтверждать значение и человеческую аудиторию. Если процентной характеристики людей нет, не создавай находку.
 - Дата публикации не является периодом исследования.
 - Если пригодной статистики нет, relevant=false и findings=[].
 """
@@ -606,26 +641,37 @@ def has_restricted_base(audience, percent_base):
     return any(marker in value for marker in RESTRICTED_AUDIENCE_MARKERS)
 
 
+def has_human_denominator(percent_base, evidence, methodology_evidence):
+    """Require an explicit people-based denominator in source-backed text."""
+    # An explicit, verbatim percent_base is authoritative. Looking at the whole
+    # evidence as well could turn "30% заказов оформлены пользователями" into a
+    # people share merely because the sentence also mentions users.
+    value = normalized(percent_base)
+    if not value:
+        value = normalized(
+            " ".join(
+                part for part in (evidence, methodology_evidence) if part
+            )
+        )
+    if not value:
+        return False
+    return any(marker in value for marker in HUMAN_AUDIENCE_MARKERS)
+
+
 def normalized_indicator_type(indicator_type, audience, percent_base):
     if indicator_type not in INDICATOR_TYPES:
-        indicator_type = "other"
+        return None
     if indicator_type == "population_share" and has_restricted_base(audience, percent_base):
         return "conditional_share"
     return indicator_type
 
 
 def normalized_ir_applicability(value, indicator_type, percent_base):
-    # Market totals can inform context, but never directly estimate incidence.
-    if indicator_type == "market_metric":
-        return "context_only"
     if value == "direct" and not percent_base:
         return "indirect"
     if value in IR_APPLICABILITY_VALUES:
         return value
-    # Missing/invalid labels are handled conservatively rather than promoted to direct.
-    if indicator_type in {"population_share", "conditional_share"}:
-        return "indirect"
-    return "context_only"
+    return "indirect"
 
 
 def validate_answer(answer, text):
@@ -697,6 +743,14 @@ def validate_answer(answer, text):
         indicator_type = normalized_indicator_type(
             raw.get("indicator_type"), audience, percent_base
         )
+        if (
+            parse_percent(value) is None
+            or indicator_type is None
+            or not has_human_denominator(
+                percent_base, evidence, methodology_evidence
+            )
+        ):
+            continue
         ir_applicability = normalized_ir_applicability(
             raw.get("ir_applicability"), indicator_type, percent_base
         )

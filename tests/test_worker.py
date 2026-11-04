@@ -90,7 +90,7 @@ class WorkerValidationTests(unittest.TestCase):
         self.assertIsNone(rows[0]["percent_base"])
         self.assertEqual(rows[0]["ir_applicability"], "indirect")
 
-    def test_market_metric_is_context_only(self):
+    def test_market_metric_is_rejected(self):
         answer = {
             "relevant": True,
             "findings": [
@@ -103,8 +103,103 @@ class WorkerValidationTests(unittest.TestCase):
                 }
             ],
         }
-        rows = validate_answer(answer, "Рынок достиг 12 млн заказов за месяц.")
-        self.assertEqual(rows[0]["ir_applicability"], "context_only")
+        self.assertEqual(
+            validate_answer(answer, "Рынок достиг 12 млн заказов за месяц."), []
+        )
+
+    def test_accepts_percentage_characteristics_of_people_including_b2b(self):
+        cases = (
+            (
+                "behavior",
+                "38% россиян покупали подержанные товары.",
+                "россиян",
+                "покупали подержанные товары",
+            ),
+            (
+                "ownership",
+                "24% жителей имеют собаку.",
+                "жителей",
+                "имеют собаку",
+            ),
+            (
+                "awareness",
+                "61% потребителей знают этот бренд.",
+                "потребителей",
+                "знают бренд",
+            ),
+            (
+                "intention",
+                "19% респондентов планируют купить автомобиль.",
+                "респондентов",
+                "планируют купить автомобиль",
+            ),
+            (
+                "opinion",
+                "47% опрошенных доверяют онлайн-опросам.",
+                "опрошенных",
+                "доверяют онлайн-опросам",
+            ),
+            (
+                "b2b",
+                "42% руководителей отделов закупок используют сервис.",
+                "руководителей отделов закупок",
+                "используют сервис",
+            ),
+        )
+        for name, evidence, percent_base, indicator in cases:
+            with self.subTest(name=name):
+                value = evidence.split("%", 1)[0] + "%"
+                answer = {
+                    "relevant": True,
+                    "findings": [
+                        {
+                            "indicator_type": "conditional_share",
+                            "ir_applicability": "direct",
+                            "audience": percent_base,
+                            "indicator": indicator,
+                            "value": value,
+                            "percent_base": percent_base,
+                            "evidence": evidence,
+                            "summary": evidence,
+                        }
+                    ],
+                }
+                rows = validate_answer(answer, evidence)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["value"], value)
+
+    def test_rejects_non_human_and_non_percentage_metrics(self):
+        cases = (
+            ("absolute", "1500 человек приняли участие.", "1500", "человек"),
+            (
+                "orders",
+                "30% заказов оформлено пользователями онлайн.",
+                "30%",
+                "заказов",
+            ),
+            ("companies", "25% компаний используют сервис.", "25%", "компаний"),
+            ("market", "Рынок вырос на 15%.", "15%", "рынка"),
+            ("forecast", "Продажи вырастут на 12%.", "12%", "продаж"),
+            ("average_check", "Средний чек вырос на 8%.", "8%", "среднего чека"),
+        )
+        for name, evidence, value, percent_base in cases:
+            with self.subTest(name=name):
+                answer = {
+                    "relevant": True,
+                    "findings": [
+                        {
+                            # Even a model classification error must not let the metric through.
+                            "indicator_type": "population_share",
+                            "ir_applicability": "direct",
+                            "audience": percent_base,
+                            "value": value,
+                            "percent_base": percent_base,
+                            "evidence": evidence,
+                            "summary": evidence,
+                        }
+                    ],
+                }
+                self.assertEqual(validate_answer(answer, evidence), [])
 
     def test_rejects_number_missing_from_evidence(self):
         answer = {
@@ -134,7 +229,7 @@ class WorkerValidationTests(unittest.TestCase):
         }
         self.assertEqual(validate_answer(answer, TEXT), [])
 
-    def test_invalid_type_becomes_other(self):
+    def test_invalid_type_is_rejected(self):
         answer = {
             "relevant": True,
             "findings": [
@@ -146,8 +241,7 @@ class WorkerValidationTests(unittest.TestCase):
                 }
             ],
         }
-        rows = validate_answer(answer, TEXT)
-        self.assertEqual(rows[0]["indicator_type"], "other")
+        self.assertEqual(validate_answer(answer, TEXT), [])
 
     def test_irrelevant_material_has_no_findings(self):
         self.assertEqual(validate_answer({"relevant": False, "findings": []}, TEXT), [])
@@ -227,6 +321,9 @@ class FindingBlockExtractionTests(unittest.TestCase):
         prompt = body["messages"][0]["content"]
         self.assertIn("geography: география", prompt)
         self.assertIn("от 0 до 20 находок", prompt)
+        self.assertIn("знаменателем всегда должны быть люди", prompt.lower())
+        self.assertNotIn("absolute_count", prompt)
+        self.assertNotIn("market_metric", prompt)
 
     def test_extracts_two_blocks_with_parent_links_and_periods(self):
         text = (
@@ -368,22 +465,30 @@ class FindingBlockExtractionTests(unittest.TestCase):
                     "finding_key": "base",
                     "block_index": 1,
                     "parent_key": None,
+                    "indicator_type": "population_share",
+                    "audience": "респонденты",
+                    "percent_base": "респондентов",
                     "value": "40%",
-                    "evidence": "40% покупали товары.",
-                    "summary": "40% покупали товары.",
+                    "evidence": "40% респондентов покупали товары.",
+                    "summary": "40% респондентов покупали товары.",
                 },
                 {
                     "finding_key": "child",
                     "block_index": 2,
                     "parent_key": "base",
+                    "indicator_type": "conditional_share",
+                    "audience": "респонденты",
+                    "percent_base": "респондентов",
                     "value": "20%",
-                    "evidence": "20% выбирали сайты объявлений.",
-                    "summary": "20% выбирали сайты объявлений.",
+                    "evidence": "20% респондентов выбирали сайты объявлений.",
+                    "summary": "20% респондентов выбирали сайты объявлений.",
                 },
             ],
         }
         rows = validate_answer(
-            answer, "40% покупали товары. 20% выбирали сайты объявлений."
+            answer,
+            "40% респондентов покупали товары. "
+            "20% респондентов выбирали сайты объявлений.",
         )
         self.assertIsNone(rows[1]["parent_finding_index"])
 
