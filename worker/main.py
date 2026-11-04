@@ -19,6 +19,7 @@ RETRY_SECONDS = int(os.environ.get("RETRY_SECONDS", "3600"))
 MAX_TEXT_CHARS = int(os.environ.get("MAX_TEXT_CHARS", "12000"))
 MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "6000"))
 WORKER_BATCH_SIZE = int(os.environ.get("WORKER_BATCH_SIZE", "20"))
+MAX_FINDINGS_PER_MATERIAL = int(os.environ.get("MAX_FINDINGS_PER_MATERIAL", "20"))
 REPROCESS_OLD = os.environ.get("REPROCESS_OLD", "0").lower() in {"1", "true", "yes"}
 TARGETING_CRITERIA_PATH = Path(__file__).with_name("targeting_criteria.json")
 
@@ -102,6 +103,9 @@ RESTRICTED_AUDIENCE_MARKERS = (
 
 PROMPT = """Ты отбираешь проверяемые статистические находки для предварительной оценки достижимости целевых аудиторий онлайн-опросов.
 
+Утвержденные таргетируемые критерии (id: название):
+{targeting_criteria}
+
 Источник: {source}
 Дата публикации: {published_at}
 Заголовок: {title}
@@ -113,6 +117,10 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
   "relevant": true или false,
   "findings": [
     {{
+      "finding_key": "уникальный внутри материала короткий ключ",
+      "block_index": 1,
+      "block_title": "короткое название смыслового блока",
+      "parent_key": "finding_key непосредственной родительской находки или null",
       "topic": "короткая тема исследования",
       "indicator_type": "population_share | conditional_share | absolute_count | market_metric | other",
       "ir_applicability": "direct | indirect | context_only",
@@ -122,6 +130,11 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
       "value": "значение вместе с единицей, например 40% или 2,3 млн, или null",
       "percent_base": "дословная короткая формулировка знаменателя/базы процента из текста или null",
       "study_period": "период проведения исследования или null",
+      "behavior_period": "период, срок или частота поведения, покупки или пользования или null",
+      "base_kind": "targetable_explicit | targetable_inferred | conditional | unknown",
+      "base_reason": "почему эта база определена именно так или null",
+      "methodology_evidence": "дословная цитата из методологии, подтверждающая базу, или null",
+      "targeting_criteria": ["id критерия из утвержденного списка или новый id-кандидат"],
       "useful_for": "для оценки какой ЦА показатель может быть полезен",
       "evidence": "точная короткая цитата из текста, подтверждающая значение и аудиторию, или null",
       "summary": "одна короткая фраза по-русски"
@@ -131,7 +144,11 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
 
 Правила:
 - Материал релевантен, если содержит статистику о населении, потребителях, работниках, организациях, поведении, пользовании товарами/услугами или характеристиках рынка, потенциально полезную для оценки ЦА.
-- Один материал может дать от 0 до 5 находок. Не дублируй один показатель разными формулировками.
+- Один материал может дать от 0 до {max_findings} находок. Не дублируй один показатель разными формулировками.
+- Сначала раздели находки одной страницы на смысловые блоки. В каждом блоке первая находка — базовая доля, остальные — уточнения внутри аудитории предыдущей находки.
+- finding_key уникален внутри материала. parent_key указывает на непосредственную родительскую находку того же блока. У базовой находки parent_key=null.
+- block_index начинается с 1. Для разных базовых измерений, например «покупали» и «продавали», используй разные блоки.
+- Базовую находку каждого блока ставь раньше дочерних. Не связывай показатели, если вложенность знаменателей неоднозначна.
 - population_share — только доля от всего населения либо широкой демографической базы, заданной лишь географией, полом или возрастом.
 - conditional_share — любая доля внутри группы, уже отобранной по поведению, пользованию, покупке, владению, профессии, заболеванию или характеристике организации. Доли среди пользователей, покупателей, продавцов, клиентов, владельцев и работников всегда conditional_share, даже если они составляют всю выборку исследования.
 - absolute_count — число людей, организаций или объектов.
@@ -140,9 +157,14 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
 - ir_applicability=direct, только если показатель непосредственно является долей людей/организаций с нужным признаком относительно ясно указанной базы.
 - ir_applicability=indirect для отношения, намерения, частоты или связанного признака, который лишь помогает косвенно оценить ЦА.
 - ir_applicability=context_only для объема рынка, заказов, оборота, среднего чека и прочего контекста, из которого нельзя получить долю ЦА. Любой market_metric должен иметь context_only.
-- Не вычисляй новые значения, не объединяй проценты и не делай предположений о знаменателе.
+- На этом этапе не вычисляй итоговые проценты и не объединяй доли: извлеки исходные значения и точные связи parent_key. Арифметику выполнит программа после проверки цитат.
 - Перед заполнением percent_base проверь не только абзац с показателем, но и описание выборки/методологии. Укажи точную аудиторию, относительно которой посчитан процент. Для исследования на специальной выборке эта выборка является базой. Если показатель рассчитан на еще более узкой подгруппе, укажи именно ее. Копируй percent_base дословным компактным фрагментом исходного текста; если такого фрагмента нет или база достоверно не определяется, оставь null.
 - Географию, аудиторию, период и базу указывай только если они явно следуют из текста. Иначе null.
+- targetable_explicit используй, когда база прямо названа и состоит только из утвержденных таргетируемых критериев.
+- targetable_inferred используй только при обоснованном выводе из описания выборки/методологии. Тогда обязательны base_reason и дословная methodology_evidence.
+- conditional используй для доли внутри поведенческой или иной нетаргетируемой группы. unknown — если база неясна.
+- В targeting_criteria перечисли id всех критериев, образующих базу. Новый возможный критерий дай коротким английским id: программа сохранит его кандидатом, но не одобрит автоматически.
+- behavior_period обязателен, когда в тексте указаны период, срок или частота покупки, продажи или пользования. Не заменяй им study_period исследования.
 - evidence должна быть дословным фрагментом переданного текста. Если числового значения нет, value и evidence могут быть null.
 - Дата публикации не является периодом исследования.
 - Если пригодной статистики нет, relevant=false и findings=[].
@@ -154,6 +176,10 @@ FINDING_JSON_SCHEMA = {
     "additionalProperties": False,
     "properties": {
         "topic": {"type": ["string", "null"]},
+        "finding_key": {"type": "string", "minLength": 1},
+        "block_index": {"type": "integer", "minimum": 1},
+        "block_title": {"type": ["string", "null"]},
+        "parent_key": {"type": ["string", "null"]},
         "indicator_type": {"type": "string", "enum": sorted(INDICATOR_TYPES)},
         "ir_applicability": {
             "type": "string",
@@ -165,12 +191,28 @@ FINDING_JSON_SCHEMA = {
         "value": {"type": ["string", "null"]},
         "percent_base": {"type": ["string", "null"]},
         "study_period": {"type": ["string", "null"]},
+        "behavior_period": {"type": ["string", "null"]},
+        "base_kind": {
+            "type": "string",
+            "enum": ["targetable_explicit", "targetable_inferred", "conditional", "unknown"],
+        },
+        "base_reason": {"type": ["string", "null"]},
+        "methodology_evidence": {"type": ["string", "null"]},
+        "targeting_criteria": {
+            "type": "array",
+            "items": {"type": "string"},
+            "uniqueItems": True,
+        },
         "useful_for": {"type": ["string", "null"]},
         "evidence": {"type": ["string", "null"]},
         "summary": {"type": "string"},
     },
     "required": [
         "topic",
+        "finding_key",
+        "block_index",
+        "block_title",
+        "parent_key",
         "indicator_type",
         "ir_applicability",
         "geography",
@@ -179,6 +221,11 @@ FINDING_JSON_SCHEMA = {
         "value",
         "percent_base",
         "study_period",
+        "behavior_period",
+        "base_kind",
+        "base_reason",
+        "methodology_evidence",
+        "targeting_criteria",
         "useful_for",
         "evidence",
         "summary",
@@ -244,10 +291,15 @@ def model_request_body(source, title, text, published_at, structured_mode):
             {
                 "role": "user",
                 "content": PROMPT.format(
+                    targeting_criteria="\n".join(
+                        f"- {item['id']}: {item['label']}"
+                        for item in load_targeting_criteria().values()
+                    ),
                     source=source,
                     published_at=published_at.isoformat() if published_at else "не указана",
                     title=title,
                     text=(text or "")[:MAX_TEXT_CHARS],
+                    max_findings=MAX_FINDINGS_PER_MATERIAL,
                 )
                 + retry_note,
             }
@@ -447,9 +499,28 @@ def validate_answer(answer, text):
         return []
 
     valid = []
-    for position, raw in enumerate(findings[:5], 1):
+    known_keys = {}
+    block_positions = {}
+    criteria = load_targeting_criteria()
+    base_kinds = {
+        "targetable_explicit",
+        "targetable_inferred",
+        "conditional",
+        "unknown",
+    }
+    for position, raw in enumerate(findings[:MAX_FINDINGS_PER_MATERIAL], 1):
         if not isinstance(raw, dict):
             continue
+        finding_key = nullable_text(raw.get("finding_key"), 100) or f"finding_{position}"
+        if finding_key in known_keys:
+            continue
+        raw_block_index = raw.get("block_index")
+        block_index = (
+            raw_block_index
+            if isinstance(raw_block_index, int) and raw_block_index > 0
+            else 1
+        )
+        block_positions[block_index] = block_positions.get(block_index, 0) + 1
         summary = nullable_text(raw.get("summary"), 500)
         value = nullable_text(raw.get("value"), 100)
         evidence = nullable_text(raw.get("evidence"), 500)
@@ -465,15 +536,40 @@ def validate_answer(answer, text):
         percent_base = nullable_text(raw.get("percent_base"), 500)
         if percent_base and not evidence_is_verbatim(percent_base, text):
             percent_base = None
+        methodology_evidence = nullable_text(raw.get("methodology_evidence"), 700)
+        if methodology_evidence and not evidence_is_verbatim(methodology_evidence, text):
+            methodology_evidence = None
+        base_kind = raw.get("base_kind")
+        if base_kind not in base_kinds:
+            base_kind = "unknown"
+        base_reason = nullable_text(raw.get("base_reason"), 700)
+        if base_kind == "targetable_inferred" and (
+            not base_reason or not methodology_evidence
+        ):
+            base_kind = "unknown"
+        approved_criteria, candidate_criteria = partition_targeting_criteria(
+            raw.get("targeting_criteria"), criteria
+        )
+        parent_key = nullable_text(raw.get("parent_key"), 100)
+        parent = known_keys.get(parent_key)
+        parent_finding_index = (
+            parent["finding_index"]
+            if parent and parent["block_index"] == block_index
+            else None
+        )
         indicator_type = normalized_indicator_type(
             raw.get("indicator_type"), audience, percent_base
         )
         ir_applicability = normalized_ir_applicability(
             raw.get("ir_applicability"), indicator_type, percent_base
         )
-        valid.append(
-            {
+        finding = {
                 "finding_index": position,
+                "finding_key": finding_key,
+                "block_index": block_index,
+                "block_position": block_positions[block_index],
+                "block_title": nullable_text(raw.get("block_title"), 300),
+                "parent_finding_index": parent_finding_index,
                 "topic": nullable_text(raw.get("topic"), 300),
                 "indicator_type": indicator_type,
                 "ir_applicability": ir_applicability,
@@ -483,11 +579,18 @@ def validate_answer(answer, text):
                 "value": value,
                 "percent_base": percent_base,
                 "study_period": nullable_text(raw.get("study_period"), 300),
+                "behavior_period": nullable_text(raw.get("behavior_period"), 300),
+                "base_kind": base_kind,
+                "base_reason": base_reason,
+                "methodology_evidence": methodology_evidence,
+                "targeting_criteria": approved_criteria,
+                "candidate_criteria": candidate_criteria,
                 "useful_for": nullable_text(raw.get("useful_for"), 700),
                 "evidence": evidence,
                 "summary": summary,
             }
-        )
+        valid.append(finding)
+        known_keys[finding_key] = finding
     return valid
 
 
