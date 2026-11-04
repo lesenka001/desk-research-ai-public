@@ -14,7 +14,7 @@ import db
 SERVICE = "worker"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = os.environ.get("MODEL", "anthropic/claude-haiku-5.5")
-PROMPT_VERSION = os.environ.get("PROMPT_VERSION", "audience-stats-v2")
+PROMPT_VERSION = os.environ.get("PROMPT_VERSION", "audience-targetable-v3")
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "10"))
 RETRY_SECONDS = int(os.environ.get("RETRY_SECONDS", "3600"))
 MAX_TEXT_CHARS = int(os.environ.get("MAX_TEXT_CHARS", "12000"))
@@ -23,6 +23,23 @@ WORKER_BATCH_SIZE = int(os.environ.get("WORKER_BATCH_SIZE", "20"))
 MAX_FINDINGS_PER_MATERIAL = int(os.environ.get("MAX_FINDINGS_PER_MATERIAL", "20"))
 REPROCESS_OLD = os.environ.get("REPROCESS_OLD", "0").lower() in {"1", "true", "yes"}
 TARGETING_CRITERIA_PATH = Path(__file__).with_name("targeting_criteria.json")
+
+
+def parse_material_ids(value):
+    ids = []
+    for part in (value or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if not part.isdigit() or int(part) <= 0:
+            raise ValueError("REPROCESS_MATERIAL_IDS должен содержать положительные id через запятую")
+        material_id = int(part)
+        if material_id not in ids:
+            ids.append(material_id)
+    return tuple(ids)
+
+
+REPROCESS_MATERIAL_IDS = parse_material_ids(os.environ.get("REPROCESS_MATERIAL_IDS"))
 
 INDICATOR_TYPES = {
     "population_share",
@@ -715,6 +732,12 @@ def validate_answer(answer, text):
 
 
 def pending_materials(conn):
+    selection = ""
+    params = [REPROCESS_OLD, PROMPT_VERSION]
+    if REPROCESS_MATERIAL_IDS:
+        selection = " AND m.id = ANY(%s)"
+        params.append(list(REPROCESS_MATERIAL_IDS))
+    params.append(WORKER_BATCH_SIZE)
     return conn.execute(
         """SELECT m.id, s.name, m.title, m.text, m.published_at,
                   m.processed_prompt_version
@@ -722,10 +745,12 @@ def pending_materials(conn):
            JOIN sources s ON s.id = m.source_id
            WHERE m.status = 'new'
               OR (%s AND m.status IN ('done', 'skipped')
-                  AND m.processed_prompt_version IS DISTINCT FROM %s)
+                  AND m.processed_prompt_version IS DISTINCT FROM %s"""
+        + selection
+        + """              )
            ORDER BY m.id
            LIMIT %s""",
-        (REPROCESS_OLD, PROMPT_VERSION, WORKER_BATCH_SIZE),
+        tuple(params),
     ).fetchall()
 
 

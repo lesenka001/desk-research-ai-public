@@ -9,7 +9,9 @@ from worker.main import (
     calculate_derived_findings,
     load_targeting_criteria,
     model_request_body,
+    parse_material_ids,
     partition_targeting_criteria,
+    pending_materials,
     process_new,
     save_result,
     validate_answer,
@@ -152,6 +154,30 @@ class WorkerValidationTests(unittest.TestCase):
 
 
 class TargetingCriteriaTests(unittest.TestCase):
+    def test_control_reprocessing_ids_are_strict_positive_integers(self):
+        self.assertEqual(parse_material_ids("10, 20,10"), (10, 20))
+        with self.assertRaisesRegex(ValueError, "положительные id"):
+            parse_material_ids("10, all")
+
+    def test_pending_materials_can_limit_old_reprocessing_to_control_ids(self):
+        class Connection:
+            def __init__(self):
+                self.query = None
+                self.params = None
+
+            def execute(self, query, params=None):
+                self.query, self.params = query, params
+                return Rows([])
+
+        conn = Connection()
+        with (
+            patch("worker.main.REPROCESS_OLD", True),
+            patch("worker.main.REPROCESS_MATERIAL_IDS", (10, 20)),
+        ):
+            pending_materials(conn)
+        self.assertIn("m.id = ANY(%s)", conn.query)
+        self.assertIn([10, 20], conn.params)
+
     def test_loads_explicit_targeting_criteria(self):
         criteria = load_targeting_criteria()
         self.assertIn("geography", criteria)

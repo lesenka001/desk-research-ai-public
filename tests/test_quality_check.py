@@ -14,6 +14,81 @@ from worker.main import (
 
 
 class QualityReportTests(unittest.TestCase):
+    def test_quality_report_contains_deterministic_derived_share(self):
+        text = (
+            "Опрос проведен среди жителей России 18+. "
+            "40% жителей России 18+ покупали подержанные товары за 6 месяцев. "
+            "Среди покупателей 25% использовали сайты объявлений."
+        )
+        item = {
+            "title": "Подержанные товары",
+            "url": "https://example.org/study",
+            "text": text,
+            "published_at": None,
+        }
+        common = {
+            "topic": "подержанные товары",
+            "ir_applicability": "direct",
+            "geography": "Россия",
+            "study_period": None,
+            "useful_for": "оценка аудитории",
+        }
+        answer = {
+            "relevant": True,
+            "findings": [
+                {
+                    **common,
+                    "finding_key": "buyers",
+                    "block_index": 1,
+                    "block_title": "Покупали",
+                    "parent_key": None,
+                    "indicator_type": "population_share",
+                    "audience": "жители России 18+",
+                    "indicator": "покупали подержанные товары",
+                    "value": "40%",
+                    "percent_base": "жителей России 18+",
+                    "behavior_period": "за 6 месяцев",
+                    "base_kind": "targetable_explicit",
+                    "base_reason": None,
+                    "methodology_evidence": None,
+                    "targeting_criteria": ["geography", "age"],
+                    "evidence": "40% жителей России 18+ покупали подержанные товары за 6 месяцев.",
+                    "summary": "40% жителей России 18+ покупали подержанные товары за 6 месяцев.",
+                },
+                {
+                    **common,
+                    "finding_key": "classifieds",
+                    "block_index": 1,
+                    "block_title": "Покупали",
+                    "parent_key": "buyers",
+                    "indicator_type": "conditional_share",
+                    "audience": "покупатели",
+                    "indicator": "использовали сайты объявлений",
+                    "value": "25%",
+                    "percent_base": "Среди покупателей",
+                    "behavior_period": None,
+                    "base_kind": "conditional",
+                    "base_reason": None,
+                    "methodology_evidence": None,
+                    "targeting_criteria": [],
+                    "evidence": "Среди покупателей 25% использовали сайты объявлений.",
+                    "summary": "25% покупателей использовали сайты объявлений.",
+                },
+            ],
+        }
+        with patch("quality_check.write_report"):
+            report = run_check(
+                [("Тест", "test", "https://example.org/feed")],
+                {"test": lambda url: iter([item])},
+                1,
+                Path("unused.json"),
+                model_call=lambda *args: answer,
+            )
+        derived = report[0]["accepted_findings"][1]
+        self.assertEqual(derived["value"], "10%")
+        self.assertEqual(derived["calculation_formula"], "40% × 25% = 10%")
+        self.assertEqual(derived["calculated_percent"], "10")
+
     def test_report_is_written_as_utf8_without_terminal_transcoding(self):
         path = Path("report.json")
         with patch.object(Path, "write_text") as write_text:

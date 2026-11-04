@@ -14,6 +14,7 @@ from worker.main import (
     PROMPT_VERSION,
     OpenRouterHTTPError,
     ask_model,
+    calculate_derived_findings,
     safe_excerpt,
     validate_answer,
 )
@@ -126,7 +127,14 @@ def run_check(
                     item["text"],
                     as_datetime(item.get("published_at")),
                 )
-                accepted = validate_answer(answer, item["text"])
+                accepted = calculate_derived_findings(
+                    validate_answer(answer, item["text"])
+                )
+                for finding in accepted:
+                    if finding.get("calculated_percent") is not None:
+                        finding["calculated_percent"] = str(
+                            finding["calculated_percent"]
+                        )
                 report.append(
                     {
                         "source": source_name,
