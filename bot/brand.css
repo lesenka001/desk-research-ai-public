@@ -195,3 +195,28 @@
   ::selection { background: var(--marker); color: var(--marker-fg); }
 }
 
+/* Finding roles stay understandable without relying on color alone. */
+.finding-type {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 7px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--corner-sm);
+  font-family: var(--family-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.finding-type--base { background: var(--fg); color: var(--bg); }
+.finding-type--derived { background: var(--signal); border-color: var(--signal); color: var(--signal-fg); }
+.finding-type--conditional { color: var(--fg-dim); border-style: dashed; }
+.item.role-base { border-color: var(--rule-strong); }
+.item.role-derived { border-left: 3px solid var(--signal); }
+.item.role-conditional { border-left-style: dashed; }
+.finding-value { font-family: var(--family-mono); font-size: 18px; font-variant-numeric: tabular-nums; }
+.detail-kind { display: flex; align-items: center; gap: 10px; }
+.detail-value { font-family: var(--family-mono); font-size: 30px; font-variant-numeric: tabular-nums; }
+

@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
@@ -8,6 +9,7 @@ from bot.main import (
     finding_lines,
     group_findings,
     page_data,
+    render_page,
     send_new,
 )
 from web.main import render
@@ -215,6 +217,9 @@ class ViewTests(unittest.TestCase):
                 "block_position": 1,
                 "block_title": "Продавали",
                 "value": "30%",
+                "parent_finding_index": None,
+                "base_kind": "targetable_explicit",
+                "is_derived": False,
             },
             {
                 "id": 2,
@@ -227,6 +232,9 @@ class ViewTests(unittest.TestCase):
                 "block_position": 2,
                 "block_title": "Покупали",
                 "value": "13%",
+                "parent_finding_index": 1,
+                "base_kind": "conditional",
+                "is_derived": True,
             },
             {
                 "id": 1,
@@ -239,6 +247,9 @@ class ViewTests(unittest.TestCase):
                 "block_position": 1,
                 "block_title": "Покупали",
                 "value": "38%",
+                "parent_finding_index": None,
+                "base_kind": "targetable_explicit",
+                "is_derived": False,
             },
         ]
         groups = group_findings(findings)
@@ -248,15 +259,82 @@ class ViewTests(unittest.TestCase):
             [item["value"] for item in groups[0]["blocks"][0]["findings"]],
             ["38%", "13%"],
         )
+        self.assertEqual(
+            [item["finding_role"] for item in groups[0]["blocks"][0]["findings"]],
+            ["base", "derived"],
+        )
 
     def test_mini_app_template_contains_calculation_audit(self):
         template = (
             __import__("pathlib").Path(__file__).parents[1] / "bot" / "template.html"
         ).read_text(encoding="utf-8")
-        self.assertIn("Расчёт от таргетируемой базы", template)
+        self.assertIn("Расчёт от базовой доли", template)
         self.assertIn("calculation_formula", template)
         self.assertIn("candidate_criteria", template)
         self.assertIn("finding-block", template)
+
+    @patch("bot.main.page_data")
+    def test_mini_app_html_has_roles_calculated_value_and_source_details(
+        self, page_data_mock
+    ):
+        findings = [
+            {
+                "id": 1,
+                "material_id": 10,
+                "finding_index": 1,
+                "finding_role": "base",
+                "value": "38%",
+                "summary": "38% россиян покупали подержанные товары.",
+            },
+            {
+                "id": 2,
+                "material_id": 10,
+                "finding_index": 2,
+                "finding_role": "derived",
+                "value": "13%",
+                "source_value": "33%",
+                "calculated_percent": "12.540000",
+                "calculation_formula": "38% × 33% = 12,54%",
+                "summary": "13% россиян покупали товары через сайты объявлений.",
+            },
+            {
+                "id": 3,
+                "material_id": 10,
+                "finding_index": 3,
+                "finding_role": "conditional",
+                "value": "22%",
+                "summary": "22% покупателей выбирают растворимый кофе.",
+            },
+        ]
+        page_data_mock.return_value = {
+            "findings": findings,
+            "material_groups": [],
+            "run": None,
+            "sources": [],
+            "totals": {"sources": 1, "materials": 1, "findings": 3, "runs": 1, "subscribers": 1},
+            "generated_at": "2026-11-05 10:00",
+        }
+        page = render_page(object())
+        marker = "const DATA = "
+        payload_start = page.index(marker) + len(marker)
+        payload_end = page.index(";", payload_start)
+        payload = json.loads(page[payload_start:payload_end])
+
+        self.assertEqual(
+            [finding["finding_role"] for finding in payload["findings"]],
+            ["base", "derived", "conditional"],
+        )
+        self.assertEqual(payload["findings"][1]["value"], "13%")
+        self.assertEqual(payload["findings"][1]["source_value"], "33%")
+        self.assertEqual(
+            payload["findings"][1]["calculation_formula"],
+            "38% × 33% = 12,54%",
+        )
+        for label in ("Базовая", "Производная", "Условная"):
+            self.assertIn(label, page)
+        self.assertIn('class="finding-value"', page)
+        self.assertIn("Исходная условная доля", page)
+        self.assertIn("findingOrder", page)
 
     def test_web_renders_statistical_fields(self):
         page = render(WebConnection())

@@ -56,8 +56,6 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .block-findings { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
 .item { width: 100%; display: block; border: 1px solid var(--rule); border-radius: var(--corner-lg); background: var(--surface); padding: 14px 14px 13px; transition: border-color .15s ease; }
 .material .item { background: var(--bg); border-radius: var(--corner-md); }
-.item.base-finding { border-color: var(--rule-strong); }
-.calculated { font-family: var(--family-mono); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--fg-faint); }
 .item:hover, .item:focus-visible { border-color: var(--rule-strong); }
 .item:active { background: var(--surface-2); }
 .line1 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 14px; color: var(--fg-dim); }
@@ -174,6 +172,35 @@ const plural = (n, one, few, many) => {
 };
 const day = (iso) => new Date(iso).toLocaleDateString("ru-RU", { day: "numeric", month: "short" });
 const tags = (f) => (f.reason || "").split(/,\s*/).map((t) => t.trim()).filter((t) => t && t.length <= 24).slice(0, 3);
+const roleLabels = { base: "Базовая", derived: "Производная", conditional: "Условная" };
+const findingRole = (f) => f.finding_role || (f.is_derived ? "derived" :
+  (f.parent_finding_index == null && ["targetable_explicit", "targetable_inferred"].includes(f.base_kind) ? "base" : "conditional"));
+const findingDepth = (f, block) => {
+  let depth = 0, current = f;
+  const seen = new Set();
+  while (current && current.parent_finding_index != null && !seen.has(current.finding_index)) {
+    seen.add(current.finding_index);
+    current = block.find((item) => item.finding_index === current.parent_finding_index);
+    if (current) depth += 1;
+  }
+  return depth;
+};
+const findingOrder = (a, b, block) => {
+  const rank = { base: 0, derived: 1, conditional: 2 };
+  return (rank[findingRole(a)] - rank[findingRole(b)]) ||
+    (findingDepth(a, block) - findingDepth(b, block)) ||
+    ((a.block_position || a.id || 0) - (b.block_position || b.id || 0));
+};
+const summaryWithoutValue = (f) => {
+  const summary = String(f.summary || "").trim();
+  const value = String(f.value || "").trim();
+  if (!value || !summary.startsWith(value)) return summary;
+  return summary.slice(value.length).replace(/^\s*[—·:–-]?\s*/, "");
+};
+const exactPercent = (value) => {
+  const number = Number(String(value == null ? "" : value).replace(",", "."));
+  return Number.isFinite(number) ? number.toLocaleString("ru-RU", { maximumFractionDigits: 6 }) : String(value || "—").replace(".", ",");
+};
 const haptic = () => { if (inTelegram && tg.HapticFeedback) tg.HapticFeedback.selectionChanged(); };
 
 function openLink(url) {
@@ -241,11 +268,14 @@ function renderFeed() {
         <section class="finding-block">
           <div class="block-title"><span class="label">${esc(block.title)}</span><span class="num">${block.findings.length}</span></div>
           <ul class="block-findings">${block.findings
-            .sort((a, b) => (a.block_position || 0) - (b.block_position || 0))
-            .map((f) => `<li><button class="item ${f.parent_finding_index == null ? "base-finding" : ""}" data-open="${f.id}">
-              <span class="line1">${f.is_derived ? `<span class="calculated">пересчитано</span>` : ""}${tags(f).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</span>
-              <p>${f.value && !f.summary.includes(f.value) ? `<strong>${esc(f.value)}</strong> · ` : ""}${esc(f.summary)}</p>
-            </button></li>`).join("")}</ul>
+            .sort((a, b) => findingOrder(a, b, block.findings))
+            .map((f) => {
+              const role = findingRole(f), summary = summaryWithoutValue(f);
+              return `<li><button class="item role-${role}" data-open="${f.id}">
+                <span class="line1"><span class="finding-type finding-type--${role}">${roleLabels[role]}</span>${tags(f).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</span>
+                <p>${f.value ? `<strong class="finding-value">${esc(f.value)}</strong>${summary ? " · " : ""}` : ""}${esc(summary)}</p>
+              </button></li>`;
+            }).join("")}</ul>
         </section>`).join("")}
     </li>`).join("")}</ul>`;
 }
@@ -256,6 +286,7 @@ function renderDetail(f) {
   const at = list.findIndex((x) => x.id === f.id);
   const same = f.summary.trim() === f.title.trim();
   const text = f.text ? esc(f.text) + (f.text.length >= 600 ? "…" : "") : "";
+  const role = findingRole(f), summary = summaryWithoutValue(f);
   const chain = (f.calculation_chain || []).map((step) => findings.find((item) => item.material_id === f.material_id && item.id !== null && item.finding_index === step.finding_index)).filter(Boolean);
   return `<article class="detail">
     <div class="bar">
@@ -267,7 +298,8 @@ function renderDetail(f) {
       </div>
     </div>
     <span class="label">${esc(f.source)} · ${day(f.date)}${f.run_id === lastRun ? " · новое" : ""}</span>
-    <h2>${esc(f.summary)}</h2>
+    <div class="detail-kind"><span class="finding-type finding-type--${role}">${roleLabels[role]}</span>${f.value ? `<strong class="detail-value">${esc(f.value)}</strong>` : ""}</div>
+    <h2>${esc(summary)}</h2>
     ${same ? "" : `<p class="orig">${esc(f.title)}</p>`}
     <div class="rec">
       <span class="label">Статистический показатель</span>
@@ -282,12 +314,12 @@ function renderDetail(f) {
       ${f.evidence ? `<p class="excerpt">Подтверждение: «${esc(f.evidence)}»</p>` : ""}
     </div>
     ${f.is_derived ? `<section class="trace">
-      <span class="label">Расчёт от таргетируемой базы</span>
+      <span class="label">Расчёт от базовой доли</span>
       <h3>${esc(f.calculation_formula || "")}</h3>
       <div class="rec">
         <p class="key">Исходная условная доля: ${esc(f.source_value || "—")}</p>
         ${f.source_percent_base ? `<p class="key">Исходная база: ${esc(f.source_percent_base)}</p>` : ""}
-        ${f.calculated_percent ? `<p class="key">Точный результат: ${esc(f.calculated_percent)}%</p>` : ""}
+        ${f.calculated_percent ? `<p class="key">Точный результат: ${esc(exactPercent(f.calculated_percent))}%</p>` : ""}
       </div>
       ${chain.map((item) => `<div class="rec"><span class="label">Шаг ${item.block_position}</span><p>${esc(item.source_value || item.value || "—")} · ${esc(item.summary)}</p>${item.evidence ? `<p class="excerpt">«${esc(item.evidence)}»</p>` : ""}</div>`).join("")}
       ${f.base_reason ? `<p class="say">Допущение о базе: ${esc(f.base_reason)}</p>` : ""}

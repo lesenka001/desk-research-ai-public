@@ -389,6 +389,19 @@ def iso(moment):
     )
 
 
+def finding_role(finding):
+    """Return the UI role from fields persisted by the worker."""
+    if finding.get("is_derived"):
+        return "derived"
+    if (
+        finding.get("parent_finding_index") is None
+        and finding.get("base_kind")
+        in {"targetable_explicit", "targetable_inferred"}
+    ):
+        return "base"
+    return "conditional"
+
+
 def group_findings(findings):
     """Group a flat feed by source page and then by calculation block."""
     materials = {}
@@ -400,6 +413,7 @@ def group_findings(findings):
             item.get("block_position") or item.get("id") or 0,
         ),
     ):
+        finding["finding_role"] = finding_role(finding)
         material_id = finding.get("material_id")
         material = materials.setdefault(
             material_id,
@@ -495,6 +509,7 @@ def page_data(conn):
         )
         if finding["calculated_percent"] is not None:
             finding["calculated_percent"] = str(finding["calculated_percent"])
+        finding["finding_role"] = finding_role(finding)
         findings.append(finding)
 
     run = conn.execute(
