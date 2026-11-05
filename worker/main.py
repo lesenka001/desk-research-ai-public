@@ -193,6 +193,10 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
       "scale_category": "название категории этой шкалы или null",
       "scale_choice_mode": "single_choice | multiple_choice | unknown | not_applicable",
       "scale_evidence": "дословная цитата, подтверждающая устройство шкалы/тип выбора, или null",
+      "composite_base_key": "общий ключ новой базы из выбранных категорий шкалы или null",
+      "composite_base_label": "текст находки после процента для новой базы или null",
+      "composite_base_behavior_period": "период/частота новой составной базы или null",
+      "include_in_composite_base": true или false,
       "question_audience": "кому именно задавался вопрос с этим показателем, или null",
       "question_audience_evidence": "дословная цитата о том, кому задавался вопрос, или null",
       "general_population": "генеральная совокупность, на которую можно распространить результат, или null",
@@ -232,6 +236,7 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
 - behavior_period обязателен, когда в тексте указаны период, срок или частота покупки, продажи или пользования. Не заменяй им study_period исследования.
 - Для behavior_period_origin используй explicit, только если у текущего показателя прямо указан собственный период/частота; inherited — если он только наследуется от родительской базы; not_stated — если определить нельзя. Для explicit обязательна дословная behavior_period_evidence.
 - Категории одной шкалы частоты с одним вариантом ответа получат одинаковый scale_key, scale_choice_mode=single_choice и разные scale_category. Вопросы «любое число ответов» и иные множественные ответы помечай multiple_choice. Не называй шкалу single_choice только по догадке: приведи scale_evidence из формулировки, анкеты, подписи или структуры шкалы.
+- Если несколько непересекающихся категорий single_choice вместе образуют полезную базу, дай им одинаковый composite_base_key и composite_base_label, отметь include_in_composite_base=true. Например, «обычная практика» и «покупали несколько раз» образуют базу «взрослых россиян когда-либо приобретали подержанные товары». Категории «никогда», «затрудняюсь ответить» и любые multiple_choice не включай. Ничего не складывай самостоятельно.
 - question_audience — люди, которым задавался конкретный вопрос. Фразу «вопрос задавался тем, кто покупал...» сохрани дословно в question_audience_evidence. Это не то же самое, что генеральная совокупность исследования.
 - general_population заполняй как «взрослые россияне» только когда методология подтверждает всероссийскую выборку 18+ из разных регионов/населенных пунктов. Обязательны general_population_reason и дословная general_population_evidence. Иначе оставь эти поля null.
 - value обязано быть процентом от 0% до 100%. evidence должна быть дословным фрагментом переданного текста и подтверждать значение и человеческую аудиторию. Если процентной характеристики людей нет, не создавай находку.
@@ -273,6 +278,10 @@ FINDING_JSON_SCHEMA = {
             "enum": ["single_choice", "multiple_choice", "unknown", "not_applicable"],
         },
         "scale_evidence": {"type": ["string", "null"]},
+        "composite_base_key": {"type": ["string", "null"]},
+        "composite_base_label": {"type": ["string", "null"]},
+        "composite_base_behavior_period": {"type": ["string", "null"]},
+        "include_in_composite_base": {"type": "boolean"},
         "question_audience": {"type": ["string", "null"]},
         "question_audience_evidence": {"type": ["string", "null"]},
         "general_population": {"type": ["string", "null"]},
@@ -314,6 +323,10 @@ FINDING_JSON_SCHEMA = {
         "scale_category",
         "scale_choice_mode",
         "scale_evidence",
+        "composite_base_key",
+        "composite_base_label",
+        "composite_base_behavior_period",
+        "include_in_composite_base",
         "question_audience",
         "question_audience_evidence",
         "general_population",
@@ -606,6 +619,111 @@ def classify_finding(finding):
     return "conditional"
 
 
+def build_composite_bases(findings):
+    """Add deterministic bases formed by non-overlapping single-choice categories."""
+    groups = {}
+    for finding in findings:
+        if (
+            finding.get("include_in_composite_base")
+            and finding.get("scale_choice_mode") == "single_choice"
+            and finding.get("composite_base_key")
+        ):
+            key = (finding.get("block_index", 1), finding["composite_base_key"])
+            groups.setdefault(key, []).append(finding)
+
+    next_index = max((item.get("finding_index", 0) for item in findings), default=0) + 1
+    after_index = {}
+    for (block_index, composite_key), components in groups.items():
+        percents = [parse_percent(item.get("value")) for item in components]
+        labels = {item.get("composite_base_label") for item in components}
+        base_kinds = {item.get("base_kind") for item in components}
+        if (
+            len(components) < 2
+            or any(value is None for value in percents)
+            or len(labels) != 1
+            or None in labels
+            or not base_kinds.issubset({"targetable_explicit", "targetable_inferred"})
+        ):
+            continue
+        total = sum(percents, Decimal("0"))
+        if total > Decimal("100"):
+            continue
+
+        first = components[0]
+        label = next(iter(labels))
+        period_values = {
+            item.get("composite_base_behavior_period")
+            for item in components
+            if item.get("composite_base_behavior_period")
+        }
+        period = next(iter(period_values)) if len(period_values) == 1 else None
+        audience_values = {
+            item.get("general_population") or item.get("audience")
+            for item in components
+            if item.get("general_population") or item.get("audience")
+        }
+        audience = next(iter(audience_values)) if len(audience_values) == 1 else None
+        component_indices = [item["finding_index"] for item in components]
+        expression = " + ".join(
+            f"{format_decimal(value)}%" for value in percents
+        )
+        value = f"{format_decimal(total)}%"
+        synthetic = {
+            **first,
+            "finding_index": next_index,
+            "finding_key": composite_key,
+            "parent_key": None,
+            "parent_finding_index": None,
+            "block_index": block_index,
+            "indicator_type": "population_share",
+            "ir_applicability": "direct",
+            "audience": audience or first.get("audience"),
+            "indicator": label,
+            "value": value,
+            "behavior_period": period,
+            "behavior_period_origin": "explicit" if period else "not_stated",
+            "behavior_period_evidence": first.get("scale_evidence") if period else None,
+            "summary": f"{value} {label}".strip().rstrip(".") + ".",
+            "evidence": " | ".join(
+                item.get("evidence") for item in components if item.get("evidence")
+            ),
+            "base_kind": (
+                "targetable_explicit"
+                if base_kinds == {"targetable_explicit"}
+                else "targetable_inferred"
+            ),
+            "base_reason": "сумма взаимоисключающих категорий одной шкалы",
+            "scale_key": None,
+            "scale_category": None,
+            "scale_choice_mode": "not_applicable",
+            "scale_evidence": first.get("scale_evidence"),
+            "composite_base_key": None,
+            "composite_base_label": None,
+            "composite_base_behavior_period": None,
+            "include_in_composite_base": False,
+            "question_audience": None,
+            "question_audience_evidence": None,
+            "is_composite_base": True,
+            "composite_component_indices": component_indices,
+            "calculation_formula": f"{expression} = {value}",
+        }
+        after_index[components[-1]["finding_index"]] = synthetic
+        next_index += 1
+
+    result = []
+    block_positions = {}
+    for item in findings:
+        result.append(dict(item))
+        synthetic = after_index.get(item.get("finding_index"))
+        if synthetic:
+            result.append(synthetic)
+    for item in result:
+        block_index = item.get("block_index", 1)
+        block_positions[block_index] = block_positions.get(block_index, 0) + 1
+        item["block_position"] = block_positions[block_index]
+    return result
+
+
 def calculate_derived_findings(findings):
     """Calculate only unambiguous percentage chains rooted in targetable bases."""
     calculated = []
@@ -614,11 +732,14 @@ def calculate_derived_findings(findings):
 
     for original in findings:
         finding = dict(original)
+        composite_formula = finding.get("calculation_formula")
         source_percent = parse_percent(finding.get("value"))
         finding["source_value"] = finding.get("value")
         finding["source_percent_base"] = finding.get("percent_base")
         finding["calculated_percent"] = None
-        finding["calculation_formula"] = None
+        finding["calculation_formula"] = (
+            composite_formula if finding.get("is_composite_base") else None
+        )
         finding["calculation_chain"] = None
         finding["is_derived"] = False
 
@@ -798,6 +919,21 @@ def validate_answer(answer, text):
             and (not scale_key or not scale_category or not scale_evidence)
         ):
             scale_choice_mode = "unknown"
+        composite_base_key = nullable_text(raw.get("composite_base_key"), 100)
+        composite_base_label = nullable_text(raw.get("composite_base_label"), 500)
+        composite_base_behavior_period = nullable_text(
+            raw.get("composite_base_behavior_period"), 300
+        )
+        include_in_composite_base = raw.get("include_in_composite_base") is True
+        if (
+            scale_choice_mode != "single_choice"
+            or not composite_base_key
+            or not composite_base_label
+        ):
+            composite_base_key = None
+            composite_base_label = None
+            composite_base_behavior_period = None
+            include_in_composite_base = False
         question_audience_evidence = nullable_text(
             raw.get("question_audience_evidence"), 700
         )
@@ -900,6 +1036,10 @@ def validate_answer(answer, text):
                 "scale_category": scale_category,
                 "scale_choice_mode": scale_choice_mode,
                 "scale_evidence": scale_evidence,
+                "composite_base_key": composite_base_key,
+                "composite_base_label": composite_base_label,
+                "composite_base_behavior_period": composite_base_behavior_period,
+                "include_in_composite_base": include_in_composite_base,
                 "question_audience": question_audience,
                 "question_audience_evidence": question_audience_evidence,
                 "general_population": general_population,
@@ -960,12 +1100,14 @@ def save_result(conn, material_id, findings):
                         source_percent_base,
                         calculated_percent, calculation_formula, calculation_chain, base_kind,
                         base_reason, methodology_evidence, is_derived, targeting_criteria,
-                        candidate_criteria, model, prompt_version)
+                        candidate_criteria, composite_base_key, composite_base_label,
+                        composite_base_behavior_period, include_in_composite_base,
+                        is_composite_base, composite_component_indices, model, prompt_version)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                            %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s::jsonb,
-                           %s::jsonb, %s, %s)
+                           %s::jsonb, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
                    ON CONFLICT (material_id, prompt_version, finding_index) DO NOTHING""",
                 (
                     material_id,
@@ -1011,6 +1153,16 @@ def save_result(conn, material_id, findings):
                     finding["is_derived"],
                     json.dumps(finding["targeting_criteria"], ensure_ascii=False),
                     json.dumps(finding["candidate_criteria"], ensure_ascii=False),
+                    finding.get("composite_base_key"),
+                    finding.get("composite_base_label"),
+                    finding.get("composite_base_behavior_period"),
+                    finding.get("include_in_composite_base", False),
+                    finding.get("is_composite_base", False),
+                    json.dumps(
+                        finding.get("composite_component_indices"), ensure_ascii=False
+                    )
+                    if finding.get("composite_component_indices")
+                    else None,
                     MODEL,
                     PROMPT_VERSION,
                 ),
@@ -1045,7 +1197,9 @@ def process_new(conn):
             continue
         try:
             answer = ask_model(source, title, text, published_at)
-            findings = calculate_derived_findings(validate_answer(answer, text or ""))
+            findings = calculate_derived_findings(
+                build_composite_bases(validate_answer(answer, text or ""))
+            )
         except Exception as error:
             conn.execute(
                 """UPDATE materials

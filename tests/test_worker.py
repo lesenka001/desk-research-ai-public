@@ -7,6 +7,7 @@ from unittest.mock import patch
 from worker.main import (
     DEFAULT_PROMPT_VERSION,
     ModelResponseError,
+    build_composite_bases,
     calculate_derived_findings,
     classify_finding,
     load_targeting_criteria,
@@ -359,6 +360,9 @@ class TargetingCriteriaTests(unittest.TestCase):
             "question_audience",
             "general_population",
             "behavior_period_origin",
+            "composite_base_key",
+            "is_composite_base",
+            "composite_component_indices",
         ):
             self.assertIn(
                 f"ADD COLUMN IF NOT EXISTS {column}", schema
@@ -387,6 +391,10 @@ class FindingBlockExtractionTests(unittest.TestCase):
             "scale_category",
             "scale_choice_mode",
             "scale_evidence",
+            "composite_base_key",
+            "composite_base_label",
+            "composite_base_behavior_period",
+            "include_in_composite_base",
             "question_audience",
             "question_audience_evidence",
             "general_population",
@@ -757,6 +765,55 @@ class DerivedCalculationTests(unittest.TestCase):
         self.assertEqual(rows[2]["value"], "5%")
         self.assertEqual(rows[2]["calculation_formula"], "40% × 50% × 25% = 5%")
         self.assertEqual(len(rows[2]["calculation_chain"]), 3)
+
+    def test_composite_base_sums_only_selected_single_choice_categories(self):
+        common = {
+            "behavior_period": None,
+            "scale_key": "purchase_frequency",
+            "scale_choice_mode": "single_choice",
+            "scale_evidence": "единая шкала частоты",
+            "composite_base_key": "ever_bought",
+            "composite_base_label": (
+                "взрослых россиян когда-либо приобретали подержанные товары"
+            ),
+            "composite_base_behavior_period": "когда-либо",
+            "include_in_composite_base": True,
+            "general_population": "взрослые россияне",
+            "general_population_reason": "всероссийская выборка 18+",
+            "general_population_evidence": "всероссийский опрос 18+",
+            "base_kind": "targetable_inferred",
+        }
+        components = [
+            self.finding(1, "14%", scale_category="обычная практика", **common),
+            self.finding(2, "36%", scale_category="несколько раз", **common),
+        ]
+
+        rows = calculate_derived_findings(build_composite_bases(components))
+
+        self.assertEqual(len(rows), 3)
+        composite = rows[2]
+        self.assertEqual(composite["value"], "50%")
+        self.assertEqual(composite["calculated_percent"], Decimal("50"))
+        self.assertEqual(composite["calculation_formula"], "14% + 36% = 50%")
+        self.assertEqual(composite["composite_component_indices"], [1, 2])
+        self.assertTrue(composite["is_composite_base"])
+        self.assertEqual(composite["finding_role"], "base")
+
+        multiple = [
+            self.finding(
+                1,
+                "21%",
+                scale_category="автомобили",
+                **{**common, "scale_choice_mode": "multiple_choice"},
+            ),
+            self.finding(
+                2,
+                "14%",
+                scale_category="бытовая техника",
+                **{**common, "scale_choice_mode": "multiple_choice"},
+            ),
+        ]
+        self.assertEqual(len(build_composite_bases(multiple)), 2)
 
     def test_candidate_criteria_do_not_block_base_but_unlinked_share_is_conditional(self):
         candidate_root = self.finding(1, "38%", candidate_criteria=["income"])
