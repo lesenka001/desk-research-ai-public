@@ -3,6 +3,9 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+from psycopg._queries import PostgresQuery
+from psycopg.adapt import Transformer
+
 from bot.main import (
     CURRENT_AUDIENCE_FINDING_SQL,
     build_digest,
@@ -156,6 +159,20 @@ class EmptyWebConnection:
 
 
 class ViewTests(unittest.TestCase):
+    def test_audience_filter_percent_is_safe_for_psycopg_placeholders(self):
+        query = PostgresQuery(Transformer())
+        query.convert(
+            "SELECT 1 FROM findings f WHERE "
+            + CURRENT_AUDIENCE_FINDING_SQL
+            + " AND f.material_id = %s",
+            (1,),
+        )
+
+        prepared = query.query.decode()
+        self.assertIn("[[:space:]]*%[[:space:]]*$", prepared)
+        self.assertNotIn("%%", prepared)
+        self.assertIn("f.material_id = $1", prepared)
+
     def test_current_feed_whitelists_audience_shares_and_one_prompt_version(self):
         conn = MiniAppQueryConnection()
         data = page_data(conn)

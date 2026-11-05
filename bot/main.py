@@ -32,7 +32,7 @@ TELEGRAM_DIGEST_LIMIT = 3800
 # metrics without deleting audit rows.
 CURRENT_AUDIENCE_FINDING_SQL = (
     "f.indicator_type IN ('population_share', 'conditional_share')"
-    " AND f.value ~ '^[[:space:]]*[0-9]+([.,][0-9]+)?[[:space:]]*%[[:space:]]*$'"
+    " AND f.value ~ '^[[:space:]]*[0-9]+([.,][0-9]+)?[[:space:]]*%%[[:space:]]*$'"
     " AND coalesce(nullif(btrim(f.percent_base), ''), nullif(btrim(f.audience), '')) IS NOT NULL"
     " AND f.prompt_version = coalesce(m.processed_prompt_version,"
     " (SELECT latest_f.prompt_version FROM findings latest_f"
