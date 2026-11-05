@@ -159,19 +159,26 @@ class EmptyWebConnection:
 
 
 class ViewTests(unittest.TestCase):
-    def test_audience_filter_percent_is_safe_for_psycopg_placeholders(self):
-        query = PostgresQuery(Transformer())
-        query.convert(
+    def test_audience_filter_percent_is_safe_with_and_without_parameters(self):
+        plain_query = PostgresQuery(Transformer())
+        plain_query.convert(
+            "SELECT 1 FROM findings f WHERE " + CURRENT_AUDIENCE_FINDING_SQL,
+            None,
+        )
+        parameterized_query = PostgresQuery(Transformer())
+        parameterized_query.convert(
             "SELECT 1 FROM findings f WHERE "
             + CURRENT_AUDIENCE_FINDING_SQL
             + " AND f.material_id = %s",
             (1,),
         )
 
-        prepared = query.query.decode()
-        self.assertIn("[[:space:]]*%[[:space:]]*$", prepared)
-        self.assertNotIn("%%", prepared)
-        self.assertIn("f.material_id = $1", prepared)
+        plain = plain_query.query.decode()
+        parameterized = parameterized_query.query.decode()
+        for prepared in (plain, parameterized):
+            self.assertIn("chr(37)", prepared)
+            self.assertNotIn("%", prepared)
+        self.assertIn("f.material_id = $1", parameterized)
 
     def test_current_feed_whitelists_audience_shares_and_one_prompt_version(self):
         conn = MiniAppQueryConnection()
