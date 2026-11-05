@@ -25,6 +25,21 @@ SEND_EVERY_SECONDS = 60
 LATEST = 5  # findings listed in the summary, the rest are in the feed
 TELEGRAM_DIGEST_LIMIT = 3800
 
+# One predicate is shared by Telegram and the Mini App. A successfully
+# processed material points to its current prompt version. Legacy materials
+# without that pointer use only their newest stored version, never a mixture of
+# interpretations. The type/value/base checks hide old market and absolute
+# metrics without deleting audit rows.
+CURRENT_AUDIENCE_FINDING_SQL = (
+    "f.indicator_type IN ('population_share', 'conditional_share')"
+    " AND f.value ~ '^[[:space:]]*[0-9]+([.,][0-9]+)?[[:space:]]*%[[:space:]]*$'"
+    " AND coalesce(nullif(btrim(f.percent_base), ''), nullif(btrim(f.audience), '')) IS NOT NULL"
+    " AND f.prompt_version = coalesce(m.processed_prompt_version,"
+    " (SELECT latest_f.prompt_version FROM findings latest_f"
+    " WHERE latest_f.material_id = m.id"
+    " ORDER BY latest_f.created_at DESC, latest_f.id DESC LIMIT 1))"
+)
+
 COMMANDS = [
     {"command": "start", "description": "подписаться на новые исследования"},
     {"command": "status", "description": "что было в последних прогонах"},
@@ -213,8 +228,7 @@ def send_new(conn):
         row[0]
         for row in conn.execute(
             "SELECT f.id FROM findings f JOIN materials m ON m.id = f.material_id"
-            " WHERE f.sent_at IS NULL AND (m.processed_prompt_version IS NULL"
-            " OR f.prompt_version = m.processed_prompt_version)"
+            " WHERE f.sent_at IS NULL AND " + CURRENT_AUDIENCE_FINDING_SQL
         )
     ]
     if not subscribers or not ids:
@@ -289,7 +303,8 @@ def status_text(conn):
         else:
             lines.append(f"{name}: еще не было")
     findings, subscribers = conn.execute(
-        "SELECT (SELECT count(*) FROM findings), (SELECT count(*) FROM subscribers)"
+        "SELECT (SELECT count(*) FROM findings f JOIN materials m ON m.id = f.material_id"
+        " WHERE " + CURRENT_AUDIENCE_FINDING_SQL + "), (SELECT count(*) FROM subscribers)"
     ).fetchone()
     lines.append(f"\nВсего находок {findings}, подписчиков {subscribers}.")
     return "\n".join(lines)
@@ -310,8 +325,8 @@ def handle(conn, message):
         latest = conn.execute(
             "SELECT f.summary, f.value, f.audience, f.percent_base, f.ir_applicability, m.url, s.name FROM findings f"
             " JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id"
-            " WHERE m.processed_prompt_version IS NULL OR f.prompt_version = m.processed_prompt_version"
-            " ORDER BY f.id DESC LIMIT 5"
+            " WHERE " + CURRENT_AUDIENCE_FINDING_SQL
+            + " ORDER BY f.id DESC LIMIT 5"
         ).fetchall()
         text = "Готово, вы подписаны. После каждого сбора пришлю сводку новых исследований и статистических показателей."
         if latest:
@@ -469,8 +484,8 @@ def page_data(conn):
         " m.title, m.url, coalesce(m.published_at, m.collected_at), m.run_id,"
         " s.id, s.name, s.url, left(m.text, 600), f.sent_at, f.model"
         " FROM findings f JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id"
-        " WHERE m.processed_prompt_version IS NULL OR f.prompt_version = m.processed_prompt_version"
-        " ORDER BY coalesce(m.published_at, m.collected_at) DESC, m.id DESC,"
+        " WHERE " + CURRENT_AUDIENCE_FINDING_SQL
+        + " ORDER BY coalesce(m.published_at, m.collected_at) DESC, m.id DESC,"
         " f.block_index, f.block_position, f.id LIMIT 300"
     ):
         finding = dict(zip(fields, row))
@@ -496,12 +511,14 @@ def page_data(conn):
         )
         added = sum(statuses.values())
         kept = conn.execute(
-            "SELECT count(*) FROM findings f JOIN materials m ON m.id = f.material_id WHERE m.run_id = %s",
+            "SELECT count(*) FROM findings f JOIN materials m ON m.id = f.material_id"
+            " WHERE m.run_id = %s AND " + CURRENT_AUDIENCE_FINDING_SQL,
             (run[0],),
         ).fetchone()[0]
         sent = conn.execute(
             "SELECT count(*) FROM findings f JOIN materials m ON m.id = f.material_id"
-            " WHERE m.run_id = %s AND f.sent_at IS NOT NULL",
+            " WHERE m.run_id = %s AND f.sent_at IS NOT NULL AND "
+            + CURRENT_AUDIENCE_FINDING_SQL,
             (run[0],),
         ).fetchone()[0]
         run_info = {
@@ -531,7 +548,9 @@ def page_data(conn):
             ("sources", "materials", "findings", "runs", "subscribers"),
             conn.execute(
                 "SELECT (SELECT count(*) FROM sources WHERE active), (SELECT count(*) FROM materials),"
-                " (SELECT count(*) FROM findings), (SELECT count(*) FROM runs), (SELECT count(*) FROM subscribers)"
+                " (SELECT count(*) FROM findings f JOIN materials m ON m.id = f.material_id WHERE "
+                + CURRENT_AUDIENCE_FINDING_SQL
+                + "), (SELECT count(*) FROM runs), (SELECT count(*) FROM subscribers)"
             ).fetchone(),
         )
     )

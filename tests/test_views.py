@@ -1,7 +1,15 @@
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 
-from bot.main import build_digest, finding_lines, group_findings
+from bot.main import (
+    CURRENT_AUDIENCE_FINDING_SQL,
+    build_digest,
+    finding_lines,
+    group_findings,
+    page_data,
+    send_new,
+)
 from web.main import render
 
 
@@ -14,6 +22,62 @@ class Rows:
 
     def fetchall(self):
         return self.rows
+
+    def __iter__(self):
+        return iter(self.rows)
+
+
+class MiniAppQueryConnection:
+    def __init__(self):
+        self.queries = []
+
+    def execute(self, query, params=None):
+        self.queries.append((query, params))
+        if "SELECT f.id, m.id" in query:
+            return Rows([])
+        if "FROM runs WHERE service = 'collector'" in query:
+            return Rows([])
+        if "SELECT (SELECT count(*) FROM sources WHERE active)" in query:
+            return Rows([(4, 8, 0, 3, 1)])
+        raise AssertionError(query)
+
+
+class ReprocessedMaterialConnection:
+    def __init__(self):
+        self.queries = []
+
+    def execute(self, query, params=None):
+        self.queries.append((query, params))
+        if "SELECT EXISTS" in query:
+            return Rows([(False,)])
+        if "SELECT chat_id FROM subscribers" in query:
+            return Rows([(1001,)])
+        if query.startswith("SELECT f.id FROM findings"):
+            return Rows([(501,)])
+        if "GROUP BY s.name" in query:
+            return Rows([("ФОМ", 1)])
+        if query.startswith("SELECT f.id, m.id"):
+            return Rows(
+                [
+                    (
+                        501,
+                        10,
+                        "Старый материал, обработанный заново",
+                        "https://example.org/old-study",
+                        "ФОМ",
+                        1,
+                        1,
+                        "Пользование",
+                        None,
+                        "38% респондентов пользовались сервисом.",
+                        "38%",
+                        False,
+                    )
+                ]
+            )
+        if query.startswith("UPDATE findings SET sent_at"):
+            return Rows([])
+        raise AssertionError(query)
 
 
 class WebConnection:
@@ -48,6 +112,47 @@ class WebConnection:
 
 
 class ViewTests(unittest.TestCase):
+    def test_current_feed_whitelists_audience_shares_and_one_prompt_version(self):
+        conn = MiniAppQueryConnection()
+        data = page_data(conn)
+        self.assertEqual(data["findings"], [])
+        feed_query = next(
+            query for query, params in conn.queries if "SELECT f.id, m.id" in query
+        )
+        self.assertIn(
+            "f.indicator_type IN ('population_share', 'conditional_share')",
+            feed_query,
+        )
+        self.assertIn("f.value ~", feed_query)
+        self.assertIn("btrim(f.percent_base)", feed_query)
+        self.assertIn("f.prompt_version = coalesce(m.processed_prompt_version", feed_query)
+        self.assertIn("ORDER BY latest_f.created_at DESC", feed_query)
+        self.assertNotIn("market_metric", CURRENT_AUDIENCE_FINDING_SQL)
+        self.assertNotIn("absolute_count", CURRENT_AUDIENCE_FINDING_SQL)
+
+    @patch("bot.main.db.finish_run")
+    @patch("bot.main.db.start_run", return_value=77)
+    @patch("bot.main.say")
+    def test_reprocessed_old_material_is_sent_when_new_version_is_current(
+        self, say_mock, start_run_mock, finish_run_mock
+    ):
+        conn = ReprocessedMaterialConnection()
+        send_new(conn)
+        say_mock.assert_called_once()
+        self.assertIn("Старый материал, обработанный заново", say_mock.call_args.args[1])
+        selection_query = next(
+            query
+            for query, params in conn.queries
+            if query.startswith("SELECT f.id FROM findings")
+        )
+        self.assertIn("f.sent_at IS NULL", selection_query)
+        self.assertIn("f.prompt_version = coalesce(m.processed_prompt_version", selection_query)
+        self.assertNotIn("m.run_id", selection_query)
+        self.assertTrue(
+            any(query.startswith("UPDATE findings SET sent_at") for query, _ in conn.queries)
+        )
+        finish_run_mock.assert_called_once()
+
     def test_telegram_digest_groups_material_and_keeps_whole_blocks(self):
         rows = [
             {
