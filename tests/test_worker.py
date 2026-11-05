@@ -17,6 +17,7 @@ from worker.main import (
     pending_materials,
     process_new,
     save_result,
+    save_processing_audit,
     validate_answer,
 )
 
@@ -372,6 +373,8 @@ class TargetingCriteriaTests(unittest.TestCase):
                 f"ADD COLUMN IF NOT EXISTS {column}", schema
             )
         self.assertNotIn("DROP TABLE", schema.upper())
+        self.assertIn("CREATE TABLE IF NOT EXISTS processing_attempts", schema)
+        self.assertIn("CREATE TABLE IF NOT EXISTS finding_candidates", schema)
 
 
 class FindingBlockExtractionTests(unittest.TestCase):
@@ -1057,6 +1060,66 @@ class SavingCalculatedFindingsTests(unittest.TestCase):
         self.assertIn("12,54%", str(conn.queries))
 
 
+class ProcessingAuditTests(unittest.TestCase):
+    class Connection:
+        def __init__(self):
+            self.queries = []
+
+        def execute(self, query, params=None):
+            self.queries.append((query, params))
+            if "INSERT INTO processing_attempts" in query:
+                return Rows([(77,)])
+            return Rows(rowcount=1)
+
+    def test_records_accepted_and_rejected_candidates_without_secrets(self):
+        valid = {
+            "finding_key": "valid",
+            "block_index": 1,
+            "summary": "40% респондентов покупали товары.",
+            "indicator_type": "population_share",
+            "value": "40%",
+            "percent_base": "респондентов",
+            "evidence": "40% респондентов покупали товары.",
+        }
+        answer = {
+            "relevant": True,
+            "findings": [
+                valid,
+                "не объект",
+                {**valid, "summary": None, "finding_key": "missing"},
+                {
+                    **valid,
+                    "finding_key": "not_verbatim",
+                    "evidence": "несуществующая цитата 40%",
+                },
+            ],
+            "_response_meta": {"structured_mode": "json_object"},
+            "_transport_meta": {"finish_reason": "stop"},
+        }
+        audit = []
+
+        rows = validate_answer(
+            answer, "40% респондентов покупали товары.", audit=audit
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            [item["rejection_code"] for item in audit],
+            [None, "not_an_object", "missing_summary", "evidence_not_verbatim"],
+        )
+        conn = self.Connection()
+        save_processing_audit(conn, 3, answer, audit, "success")
+        attempt_params = next(
+            params
+            for query, params in conn.queries
+            if "INSERT INTO processing_attempts" in query
+        )
+        self.assertEqual(attempt_params[-3:], (4, 1, 3))
+        self.assertEqual(attempt_params[3], "json_object")
+        self.assertNotIn("Authorization", str(conn.queries))
+        self.assertNotIn("OPENROUTER_API_KEY", str(conn.queries))
+
+
 class Rows:
     def __init__(self, rows=None, rowcount=0):
         self.rows = rows or []
@@ -1064,6 +1127,9 @@ class Rows:
 
     def fetchall(self):
         return self.rows
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
 
 
 class FailingMaterialConnection:
@@ -1074,6 +1140,8 @@ class FailingMaterialConnection:
         self.queries.append((query, params))
         if "FROM materials m" in query:
             return Rows([(1, "НАФИ", "Заголовок", "Текст", None, None)])
+        if "INSERT INTO processing_attempts" in query:
+            return Rows([(77,)])
         return Rows(rowcount=1)
 
 
@@ -1089,6 +1157,7 @@ class WorkerFailureTests(unittest.TestCase):
         sql = "\n".join(query for query, params in conn.queries)
         self.assertIn("processing_error", sql)
         self.assertIn("status = 'failed'", sql)
+        self.assertIn("INSERT INTO processing_attempts", sql)
         self.assertNotIn("INSERT INTO findings", sql)
 
 

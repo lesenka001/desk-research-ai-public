@@ -131,6 +131,40 @@ CREATE TABLE IF NOT EXISTS subscribers (
     started_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS processing_attempts (
+    id              BIGSERIAL PRIMARY KEY,
+    material_id     INTEGER NOT NULL REFERENCES materials(id),
+    prompt_version  TEXT NOT NULL,
+    model           TEXT NOT NULL,
+    structured_mode TEXT,
+    status          TEXT NOT NULL,
+    finish_reason   TEXT,
+    raw_response    JSONB,
+    error           TEXT,
+    candidate_count INTEGER NOT NULL DEFAULT 0,
+    accepted_count  INTEGER NOT NULL DEFAULT 0,
+    rejected_count  INTEGER NOT NULL DEFAULT 0,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS finding_candidates (
+    id               BIGSERIAL PRIMARY KEY,
+    attempt_id       BIGINT NOT NULL REFERENCES processing_attempts(id),
+    candidate_index  INTEGER NOT NULL,
+    raw_candidate    JSONB,
+    accepted         BOOLEAN NOT NULL DEFAULT FALSE,
+    rejection_code   TEXT,
+    rejection_reason TEXT,
+    finding_index    INTEGER,
+    finding_id       INTEGER REFERENCES findings(id),
+    UNIQUE (attempt_id, candidate_index)
+);
+
+CREATE INDEX IF NOT EXISTS processing_attempts_material_created_idx
+    ON processing_attempts (material_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS finding_candidates_attempt_idx
+    ON finding_candidates (attempt_id, candidate_index);
+
 -- Preserve workshop data, but stop collecting the old AI-news sources.
 UPDATE sources SET active = FALSE
 WHERE kind IN ('hn', 'arxiv', 'rss')

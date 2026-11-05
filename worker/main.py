@@ -489,7 +489,9 @@ def request_model_once(source, title, text, published_at, structured_mode):
         raise OpenRouterHTTPError(
             error.code, safe_excerpt(body_excerpt), structured_mode
         ) from error
-    return parse_model_content(content, choice.get("finish_reason"))
+    answer = parse_model_content(content, choice.get("finish_reason"))
+    answer["_transport_meta"] = {"finish_reason": choice.get("finish_reason")}
+    return answer
 
 
 def ask_model(source, title, text, published_at):
@@ -879,12 +881,30 @@ def normalized_ir_applicability(value, indicator_type, percent_base):
     return "indirect"
 
 
-def validate_answer(answer, text):
+def validate_answer(answer, text, audit=None):
+    def record(position, raw, accepted, code=None, reason=None, finding_index=None):
+        if audit is not None:
+            audit.append(
+                {
+                    "candidate_index": position,
+                    "raw_candidate": raw,
+                    "accepted": accepted,
+                    "rejection_code": code,
+                    "rejection_reason": reason,
+                    "finding_index": finding_index,
+                }
+            )
+
     if not isinstance(answer, dict) or answer.get("relevant") is not True:
         return []
     findings = answer.get("findings")
     if not isinstance(findings, list):
         return []
+
+    for position, raw in enumerate(
+        findings[MAX_FINDINGS_PER_MATERIAL:], MAX_FINDINGS_PER_MATERIAL + 1
+    ):
+        record(position, raw, False, "over_limit", "кандидат превышает лимит находок")
 
     valid = []
     known_keys = {}
@@ -903,11 +923,18 @@ def validate_answer(answer, text):
         "not_applicable",
     }
     behavior_period_origins = {"explicit", "inherited", "not_stated"}
+    composite_keys = {
+        nullable_text(item.get("composite_base_key"), 100)
+        for item in findings
+        if isinstance(item, dict) and item.get("include_in_composite_base") is True
+    }
     for position, raw in enumerate(findings[:MAX_FINDINGS_PER_MATERIAL], 1):
         if not isinstance(raw, dict):
+            record(position, raw, False, "not_an_object", "кандидат не является объектом")
             continue
         finding_key = nullable_text(raw.get("finding_key"), 100) or f"finding_{position}"
         if finding_key in known_keys:
+            record(position, raw, False, "duplicate_key", "повторяющийся finding_key")
             continue
         raw_block_index = raw.get("block_index")
         block_index = (
@@ -920,12 +947,26 @@ def validate_answer(answer, text):
         value = nullable_text(raw.get("value"), 100)
         evidence = nullable_text(raw.get("evidence"), 500)
         if not summary:
+            record(position, raw, False, "missing_summary", "не заполнен summary")
             continue
         # Numeric findings require a verbatim quote containing the same numbers.
-        if value and (
-            not evidence_is_verbatim(evidence, text)
-            or not value_supported(value, evidence)
-        ):
+        if value and not evidence_is_verbatim(evidence, text):
+            record(
+                position,
+                raw,
+                False,
+                "evidence_not_verbatim",
+                "цитата отсутствует в тексте материала",
+            )
+            continue
+        if value and not value_supported(value, evidence):
+            record(
+                position,
+                raw,
+                False,
+                "value_not_supported",
+                "число не подтверждается цитатой",
+            )
             continue
         audience = nullable_text(raw.get("audience"), 500)
         percent_base = nullable_text(raw.get("percent_base"), 500)
@@ -1015,6 +1056,15 @@ def validate_answer(answer, text):
         )
         parent_key = nullable_text(raw.get("parent_key"), 100)
         parent = known_keys.get(parent_key)
+        if parent_key and parent is None and parent_key not in composite_keys:
+            record(
+                position,
+                raw,
+                False,
+                "invalid_parent",
+                "родительский ключ не найден",
+            )
+            continue
         parent_finding_index = (
             parent["finding_index"]
             if parent and parent["block_index"] == block_index
@@ -1023,18 +1073,29 @@ def validate_answer(answer, text):
         indicator_type = normalized_indicator_type(
             raw.get("indicator_type"), audience, percent_base
         )
-        if (
-            parse_percent(value) is None
-            or indicator_type is None
-            or not has_human_denominator(
-                percent_base, evidence, methodology_evidence
+        if parse_percent(value) is None or indicator_type is None:
+            record(position, raw, False, "invalid_percent", "значение не является долей людей 0–100%")
+            continue
+        if not has_human_denominator(percent_base, evidence, methodology_evidence):
+            record(
+                position,
+                raw,
+                False,
+                "missing_human_denominator",
+                "не подтверждён человеческий знаменатель",
             )
-        ):
             continue
         # A conditional share is useful on its own only when the article states
         # the exact human group used as its denominator. Evidence that merely
         # mentions people elsewhere in the sentence is not enough.
         if indicator_type == "conditional_share" and not percent_base:
+            record(
+                position,
+                raw,
+                False,
+                "conditional_base_missing",
+                "не указана база условной доли",
+            )
             continue
         if indicator_type == "conditional_share":
             base_kind = "conditional"
@@ -1085,6 +1146,7 @@ def validate_answer(answer, text):
             }
         valid.append(finding)
         known_keys[finding_key] = finding
+        record(position, raw, True, finding_index=position)
     return valid
 
 
@@ -1205,6 +1267,65 @@ def save_result(conn, material_id, findings):
     return status
 
 
+def save_processing_audit(
+    conn, material_id, answer, audit, status, error=None
+):
+    """Persist public-safe model diagnostics without request headers or secrets."""
+    response_meta = (answer or {}).get("_response_meta") or {}
+    transport_meta = (answer or {}).get("_transport_meta") or {}
+    candidates = (answer or {}).get("findings")
+    candidate_count = len(candidates) if isinstance(candidates, list) else 0
+    accepted_count = sum(1 for item in audit if item.get("accepted"))
+    rejected_count = sum(1 for item in audit if not item.get("accepted"))
+    attempt_id = conn.execute(
+        """INSERT INTO processing_attempts
+               (material_id, prompt_version, model, structured_mode, status,
+                finish_reason, raw_response, error, candidate_count,
+                accepted_count, rejected_count)
+           VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
+           RETURNING id""",
+        (
+            material_id,
+            PROMPT_VERSION,
+            MODEL,
+            response_meta.get("structured_mode"),
+            status,
+            transport_meta.get("finish_reason"),
+            json.dumps(answer, ensure_ascii=False) if answer is not None else None,
+            nullable_text(error, 1000),
+            candidate_count,
+            accepted_count,
+            rejected_count,
+        ),
+    ).fetchone()[0]
+    for item in audit:
+        conn.execute(
+            """INSERT INTO finding_candidates
+                   (attempt_id, candidate_index, raw_candidate, accepted,
+                    rejection_code, rejection_reason, finding_index)
+               VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s)""",
+            (
+                attempt_id,
+                item["candidate_index"],
+                json.dumps(item.get("raw_candidate"), ensure_ascii=False),
+                item["accepted"],
+                item.get("rejection_code"),
+                item.get("rejection_reason"),
+                item.get("finding_index"),
+            ),
+        )
+    conn.execute(
+        """UPDATE finding_candidates c
+           SET finding_id = f.id
+           FROM findings f
+           WHERE c.attempt_id = %s AND c.accepted
+             AND f.material_id = %s AND f.prompt_version = %s
+             AND f.finding_index = c.finding_index""",
+        (attempt_id, material_id, PROMPT_VERSION),
+    )
+    return attempt_id
+
+
 def process_new(conn):
     pending = pending_materials(conn)
     if not pending:
@@ -1224,12 +1345,24 @@ def process_new(conn):
                 ("done" if has_findings else "skipped", material_id),
             )
             continue
+        answer = None
+        validation_audit = []
         try:
             answer = ask_model(source, title, text, published_at)
             findings = calculate_derived_findings(
-                build_composite_bases(validate_answer(answer, text or ""))
+                build_composite_bases(
+                    validate_answer(answer, text or "", audit=validation_audit)
+                )
             )
         except Exception as error:
+            save_processing_audit(
+                conn,
+                material_id,
+                answer,
+                validation_audit,
+                "model_error",
+                f"{type(error).__name__}: {error}",
+            )
             conn.execute(
                 """UPDATE materials
                    SET status = 'failed', processing_error = %s
@@ -1240,6 +1373,16 @@ def process_new(conn):
             continue
 
         save_result(conn, material_id, findings)
+        audit_status = (
+            "validation_empty"
+            if isinstance(answer.get("findings"), list)
+            and answer["findings"]
+            and not any(item.get("accepted") for item in validation_audit)
+            else "success"
+        )
+        save_processing_audit(
+            conn, material_id, answer, validation_audit, audit_status
+        )
         found += len(findings)
         if findings:
             db.log(SERVICE, f"материал {material_id} -> {len(findings)} статистических находок")
