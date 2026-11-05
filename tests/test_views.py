@@ -15,7 +15,7 @@ from bot.main import (
     render_page,
     send_new,
 )
-from web.main import render
+from web.main import render, render_material
 
 
 class Rows:
@@ -100,6 +100,10 @@ class WebConnection:
             return Rows([("base", 1), ("conditional", 1)])
         if "FROM materials GROUP BY status" in query:
             return Rows([("done", 6), ("failed", 2)])
+        if "FROM processing_attempts GROUP BY status" in query:
+            return Rows([("success", 4), ("model_error", 1)])
+        if "FROM finding_candidates" in query:
+            return Rows([(7, 3)])
         if "FROM runs WHERE service = 'collector'" in query:
             return Rows([])
         if "SELECT m.published_at" in query:
@@ -128,6 +132,12 @@ class WebConnection:
                         1,
                     )
                 ]
+            )
+        if "LEFT JOIN LATERAL" in query:
+            return Rows(
+                [(10, "ФОМ", "Исследование кофе", "https://example.org/study",
+                  datetime(2026, 11, 2, tzinfo=timezone.utc), "done", "v5", None,
+                  2, 1, 1, 1)]
             )
         raise AssertionError(query)
 
@@ -159,10 +169,38 @@ class EmptyWebConnection:
             return Rows([])
         if "FROM materials GROUP BY status" in query:
             return Rows([("done", 8)])
+        if "FROM processing_attempts GROUP BY status" in query:
+            return Rows([])
+        if "FROM finding_candidates" in query:
+            return Rows([(0, 0)])
         if "FROM runs WHERE service = 'collector'" in query:
             return Rows([])
         if "SELECT m.published_at" in query:
             return Rows([])
+        if "LEFT JOIN LATERAL" in query:
+            return Rows([])
+        raise AssertionError(query)
+
+
+class MaterialDetailConnection:
+    def execute(self, query, params=None):
+        if "FROM materials m JOIN sources" in query:
+            return Rows([(3, "ФОМ", "Материал <script>alert(1)</script>",
+                          "https://example.org/study", "done", "v6",
+                          "Текст <img src=x onerror=alert(1)>")])
+        if "FROM processing_attempts WHERE" in query:
+            return Rows([(9, datetime(2026, 11, 5, tzinfo=timezone.utc), "v6", "model",
+                          "json_object", "success", "stop", 2, 1, 1, None,
+                          {"findings": ["<script>raw</script>"]})])
+        if "FROM finding_candidates fc" in query:
+            return Rows([
+                (1, True, None, None, 1, {"summary": "принят"}),
+                (2, False, "missing_summary", "Нет подписи <b>x</b>", None,
+                 {"value": "22%", "html": "<script>x</script>"}),
+            ])
+        if "FROM findings WHERE" in query:
+            return Rows([(1, 1, "Покупка", "50%", "50%", "50% взрослых покупали",
+                          None, False, None, "50% опрошенных", "репрезентативно")])
         raise AssertionError(query)
 
 
@@ -506,6 +544,9 @@ class ViewTests(unittest.TestCase):
         self.assertIn("Базовые: <b>1</b>", page)
         self.assertIn("Условные: <b>1</b>", page)
         self.assertIn("С ошибкой: <b>2</b>", page)
+        self.assertIn("Успешные: <b>4</b>", page)
+        self.assertIn("Принято кандидатов: <b>7</b>", page)
+        self.assertIn('href="/materials/10"', page)
         self.assertNotIn("<form", page.lower())
         compose = (__import__("pathlib").Path(__file__).parents[1] / "docker-compose.yml").read_text(encoding="utf-8")
         self.assertIn("SERVICE_FQDN_WEB_8000", compose)
@@ -514,6 +555,20 @@ class ViewTests(unittest.TestCase):
         )
         self.assertIn(CURRENT_AUDIENCE_FINDING_SQL, findings_query)
         self.assertIn("CASE WHEN f.is_derived THEN 1", findings_query)
+
+    def test_public_material_diagnostics_are_escaped_and_read_only(self):
+        page = render_material(MaterialDetailConnection(), 3)
+
+        self.assertIn("missing_summary", page)
+        self.assertIn("отклонён", page)
+        self.assertIn("принят", page)
+        self.assertIn("50% взрослых покупали", page)
+        self.assertIn("репрезентативно", page)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
+        self.assertIn("&lt;img src=x onerror=alert(1)&gt;", page)
+        self.assertNotIn("<script>", page.lower())
+        self.assertNotIn("<form", page.lower())
+        self.assertNotIn("<button", page.lower())
 
     @patch("bot.main.say")
     def test_market_only_material_is_absent_from_telegram_and_web(self, say_mock):
