@@ -9,6 +9,7 @@ from worker.main import (
     ModelResponseError,
     build_composite_bases,
     calculate_derived_findings,
+    expand_model_answer,
     classify_finding,
     load_targeting_criteria,
     model_request_body,
@@ -390,27 +391,17 @@ class FindingBlockExtractionTests(unittest.TestCase):
         strict_body = model_request_body(
             "ФОМ", "Тест", "Текст", None, "json_schema"
         )
-        finding_schema = strict_body["response_format"]["json_schema"]["schema"][
-            "properties"
-        ]["findings"]["items"]
-        for field in (
-            "scale_key",
-            "scale_category",
-            "scale_choice_mode",
-            "scale_evidence",
-            "composite_base_key",
-            "composite_base_label",
-            "composite_base_behavior_period",
-            "include_in_composite_base",
-            "question_audience",
-            "question_audience_evidence",
-            "general_population",
-            "general_population_reason",
-            "general_population_evidence",
-            "behavior_period_origin",
-            "behavior_period_evidence",
-        ):
-            self.assertIn(field, finding_schema["required"])
+        schema = strict_body["response_format"]["json_schema"]["schema"]
+        self.assertEqual(schema["required"], ["relevant", "context", "blocks"])
+        block_schema = schema["properties"]["blocks"]["items"]
+        question_schema = block_schema["properties"]["questions"]["items"]
+        finding_schema = block_schema["properties"]["findings"]["items"]
+        self.assertIn("general_population_evidence", schema["properties"]["context"]["required"])
+        self.assertIn("question_key", question_schema["required"])
+        self.assertIn("composite_base_key", question_schema["required"])
+        self.assertIn("question_key", finding_schema["required"])
+        self.assertNotIn("general_population", finding_schema["properties"])
+        self.assertNotIn("percent_base", finding_schema["properties"])
 
     def test_extracts_scale_question_audiences_and_general_population(self):
         methodology = (
@@ -1026,6 +1017,192 @@ class DerivedCalculationTests(unittest.TestCase):
         )
         self.assertEqual(rows[1]["value"], "2,3 млн")
         self.assertIsNone(rows[1]["calculated_percent"])
+
+
+class CompactV6ContractTests(unittest.TestCase):
+    def test_full_control_article_expands_validates_and_calculates_four_by_ten(self):
+        methodology = (
+            "«ФОМнибус» – еженедельный всероссийский поквартирный опрос россиян "
+            "в возрасте 18 лет и старше. 51 субъект РФ, 97 населенных пунктов, "
+            "1500 респондентов."
+        )
+        frequency = (
+            "Обычной практикой покупку подержанных товаров называют 14% опрошенных, "
+            "еще 36% приобретали их несколько раз."
+        )
+        buy_question = (
+            "Покупатели подержанных товаров. Вопрос задавался тем, кто покупал "
+            "подержанные товары, – отвечали 50% респондентов. Карточка, любое число ответов."
+        )
+        buy_results = (
+            "Чаще всего покупали автомобили – 21%, бытовую технику – 14% и "
+            "электронику – 14%. Основной мотив – экономия (35%), основной канал – "
+            "сайты объявлений (33%)."
+        )
+        sell_base = "Подержанные товары продавали 38% респондентов."
+        sell_question = (
+            "Продавцы подержанных товаров. Вопрос задавался тем, кто продавал "
+            "подержанные товары. Карточка, любое число ответов."
+        )
+        sell_results = (
+            "Автомобили продавали 15%, бытовую технику – 11%, электронику – 10%. "
+            "Сайты объявлений использовали 31%, а основной причиной продажи было "
+            "желание освободить место – 23%."
+        )
+        scale_evidence = "Шкала частоты покупки: один вариант ответа."
+        text = "\n".join(
+            [methodology, scale_evidence, frequency, buy_question, buy_results,
+             sell_base, sell_question, sell_results]
+        )
+
+        context = {
+            "geography": "Россия",
+            "general_population": "взрослые россияне",
+            "general_population_reason": "всероссийская выборка россиян 18+",
+            "general_population_evidence": methodology,
+            "study_period": None,
+            "methodology_evidence": methodology,
+        }
+
+        def question(key, audience, audience_evidence, percent_base, **extra):
+            result = {
+                "question_key": key,
+                "audience": audience,
+                "audience_evidence": audience_evidence,
+                "percent_base": percent_base,
+                "behavior_period": None,
+                "behavior_period_origin": "not_stated",
+                "behavior_period_evidence": None,
+                "scale_key": None,
+                "scale_choice_mode": "not_applicable",
+                "scale_evidence": None,
+                "composite_base_key": None,
+                "composite_base_label": None,
+                "composite_base_behavior_period": None,
+                "base_kind": "conditional",
+                "base_reason": None,
+                "useful_for": "оценка аудитории",
+            }
+            result.update(extra)
+            return result
+
+        def finding(key, question_key, value, evidence, summary, indicator, **extra):
+            result = {
+                "finding_key": key,
+                "parent_key": None,
+                "question_key": question_key,
+                "indicator": indicator,
+                "value": value,
+                "evidence": evidence,
+                "summary": summary,
+                "indicator_type": "population_share",
+                "ir_applicability": "direct",
+                "scale_category": None,
+                "include_in_composite_base": False,
+                "targeting_criteria": ["geography", "age"],
+            }
+            result.update(extra)
+            return result
+
+        buy_questions = [
+            question(
+                "buy_frequency", "взрослые россияне", methodology, "опрошенных",
+                behavior_period="когда-либо", behavior_period_origin="inherited",
+                scale_key="purchase_frequency", scale_choice_mode="single_choice",
+                scale_evidence=scale_evidence, composite_base_key="ever_bought",
+                composite_base_label="взрослых россиян когда-либо приобретали подержанные товары",
+                composite_base_behavior_period="когда-либо",
+                base_kind="targetable_inferred", base_reason="всероссийская выборка 18+",
+            ),
+            question(
+                "buy_details", "покупатели подержанных товаров", buy_question,
+                "Покупатели подержанных товаров", behavior_period="когда-либо",
+                behavior_period_origin="inherited", scale_key="buy_details",
+                scale_choice_mode="multiple_choice", scale_evidence="Карточка, любое число ответов",
+            ),
+        ]
+        buy_findings = [
+            finding("usual", "buy_frequency", "14%", frequency,
+                    "14% взрослых считают покупку подержанных товаров обычной практикой.",
+                    "обычная практика", scale_category="обычная практика",
+                    include_in_composite_base=True),
+            finding("several", "buy_frequency", "36%", frequency,
+                    "36% взрослых несколько раз покупали подержанные товары.",
+                    "покупали несколько раз", scale_category="несколько раз",
+                    include_in_composite_base=True),
+        ]
+        for key, value, indicator in (
+            ("buy_car", "21%", "приобретали подержанные автомобили"),
+            ("buy_appliance", "14%", "приобретали подержанную бытовую технику"),
+            ("buy_electronics", "14%", "приобретали подержанную электронику"),
+            ("buy_saving", "35%", "покупали с целью экономии"),
+            ("buy_ads", "33%", "покупали через сайты объявлений"),
+        ):
+            buy_findings.append(
+                finding(key, "buy_details", value, buy_results, f"{value} покупателей: {indicator}.",
+                        indicator, parent_key="ever_bought", indicator_type="conditional_share",
+                        targeting_criteria=[])
+            )
+
+        sell_questions = [
+            question(
+                "sell_base", "взрослые россияне", methodology, "респондентов",
+                behavior_period="когда-либо", behavior_period_origin="inherited",
+                base_kind="targetable_inferred", base_reason="всероссийская выборка 18+",
+            ),
+            question(
+                "sell_details", "продавцы подержанных товаров", sell_question,
+                "Продавцы подержанных товаров", behavior_period="когда-либо",
+                behavior_period_origin="inherited", scale_key="sell_details",
+                scale_choice_mode="multiple_choice", scale_evidence="Карточка, любое число ответов",
+            ),
+        ]
+        sell_findings = [
+            finding("sold", "sell_base", "38%", sell_base,
+                    "38% взрослых продавали подержанные товары когда-либо.",
+                    "продавали подержанные товары"),
+        ]
+        for key, value, indicator in (
+            ("sell_car", "15%", "продавали подержанные автомобили"),
+            ("sell_appliance", "11%", "продавали подержанную бытовую технику"),
+            ("sell_electronics", "10%", "продавали подержанную электронику"),
+            ("sell_ads", "31%", "продавали через сайты объявлений"),
+            ("sell_space", "23%", "продавали с целью освободить место"),
+        ):
+            sell_findings.append(
+                finding(key, "sell_details", value, sell_results, f"{value} продавцов: {indicator}.",
+                        indicator, parent_key="sold", indicator_type="conditional_share",
+                        targeting_criteria=[])
+            )
+
+        answer = {
+            "relevant": True,
+            "context": context,
+            "blocks": [
+                {"block_index": 1, "block_title": "Покупка", "topic": "подержанные товары",
+                 "questions": buy_questions, "findings": buy_findings},
+                {"block_index": 2, "block_title": "Продажа", "topic": "подержанные товары",
+                 "questions": sell_questions, "findings": sell_findings},
+            ],
+        }
+
+        expanded = expand_model_answer(answer)
+        rows = calculate_derived_findings(
+            build_composite_bases(validate_answer(expanded, text))
+        )
+
+        self.assertEqual(len(expanded["findings"]), 13)
+        self.assertEqual(len(rows), 14)
+        self.assertEqual(
+            [sum(row["finding_role"] == role for row in rows) for role in ("base", "derived", "conditional")],
+            [4, 10, 0],
+        )
+        self.assertEqual(
+            [row["value"] for row in rows],
+            ["14%", "36%", "50%", "10,5%", "7%", "7%", "17,5%", "16,5%",
+             "38%", "6%", "4%", "4%", "12%", "9%"],
+        )
+        self.assertEqual(expanded["_raw_model_response"], answer)
 
 
 class SavingCalculatedFindingsTests(unittest.TestCase):

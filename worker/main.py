@@ -356,6 +356,152 @@ RESPONSE_JSON_SCHEMA = {
     "required": ["relevant", "findings"],
 }
 
+# v6 keeps repeated methodology and denominator context outside individual
+# findings. The legacy internal shape remains the single input to validation and
+# calculation, and is produced deterministically by expand_model_answer().
+V6_FINDING_JSON_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "finding_key": {"type": "string"},
+        "parent_key": {"type": ["string", "null"]},
+        "question_key": {"type": "string"},
+        "indicator": {"type": ["string", "null"]},
+        "value": {"type": "string"},
+        "evidence": {"type": "string"},
+        "summary": {"type": "string"},
+        "indicator_type": {"type": "string", "enum": sorted(INDICATOR_TYPES)},
+        "ir_applicability": {"type": "string", "enum": sorted(IR_APPLICABILITY_VALUES)},
+        "scale_category": {"type": ["string", "null"]},
+        "include_in_composite_base": {"type": "boolean"},
+        "targeting_criteria": {
+            "type": "array", "items": {"type": "string"}, "uniqueItems": True,
+        },
+    },
+    "required": [
+        "finding_key", "parent_key", "question_key", "indicator", "value",
+        "evidence", "summary", "indicator_type", "ir_applicability",
+        "scale_category", "include_in_composite_base", "targeting_criteria",
+    ],
+}
+
+V6_QUESTION_JSON_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "question_key": {"type": "string"},
+        "audience": {"type": ["string", "null"]},
+        "audience_evidence": {"type": ["string", "null"]},
+        "percent_base": {"type": ["string", "null"]},
+        "behavior_period": {"type": ["string", "null"]},
+        "behavior_period_origin": {
+            "type": "string", "enum": ["explicit", "inherited", "not_stated"],
+        },
+        "behavior_period_evidence": {"type": ["string", "null"]},
+        "scale_key": {"type": ["string", "null"]},
+        "scale_choice_mode": {
+            "type": "string",
+            "enum": ["single_choice", "multiple_choice", "unknown", "not_applicable"],
+        },
+        "scale_evidence": {"type": ["string", "null"]},
+        "composite_base_key": {"type": ["string", "null"]},
+        "composite_base_label": {"type": ["string", "null"]},
+        "composite_base_behavior_period": {"type": ["string", "null"]},
+        "base_kind": {
+            "type": "string",
+            "enum": ["targetable_explicit", "targetable_inferred", "conditional", "unknown"],
+        },
+        "base_reason": {"type": ["string", "null"]},
+        "useful_for": {"type": ["string", "null"]},
+    },
+    "required": [
+        "question_key", "audience", "audience_evidence", "percent_base",
+        "behavior_period", "behavior_period_origin", "behavior_period_evidence",
+        "scale_key", "scale_choice_mode", "scale_evidence", "composite_base_key",
+        "composite_base_label", "composite_base_behavior_period", "base_kind",
+        "base_reason", "useful_for",
+    ],
+}
+
+V6_BLOCK_JSON_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "block_index": {"type": "integer", "minimum": 1},
+        "block_title": {"type": "string"},
+        "topic": {"type": ["string", "null"]},
+        "questions": {"type": "array", "items": V6_QUESTION_JSON_SCHEMA},
+        "findings": {"type": "array", "items": V6_FINDING_JSON_SCHEMA},
+    },
+    "required": ["block_index", "block_title", "topic", "questions", "findings"],
+}
+
+V6_CONTEXT_JSON_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "geography": {"type": ["string", "null"]},
+        "general_population": {"type": ["string", "null"]},
+        "general_population_reason": {"type": ["string", "null"]},
+        "general_population_evidence": {"type": ["string", "null"]},
+        "study_period": {"type": ["string", "null"]},
+        "methodology_evidence": {"type": ["string", "null"]},
+    },
+    "required": [
+        "geography", "general_population", "general_population_reason",
+        "general_population_evidence", "study_period", "methodology_evidence",
+    ],
+}
+
+RESPONSE_JSON_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "relevant": {"type": "boolean"},
+        "context": V6_CONTEXT_JSON_SCHEMA,
+        "blocks": {"type": "array", "items": V6_BLOCK_JSON_SCHEMA},
+    },
+    "required": ["relevant", "context", "blocks"],
+}
+
+PROMPT = """Ты извлекаешь только процентные доли людей для оценки аудиторий онлайн-опросов.
+
+Утвержденные таргетируемые критерии (id: название):
+{targeting_criteria}
+
+Источник: {source}
+Дата публикации: {published_at}
+Заголовок: {title}
+Текст публикации:
+{text}
+
+Верни один JSON по заданной схеме v6: relevant, общий context и смысловые blocks.
+Внутри блока вынеси повторяющийся знаменатель, период и шкалу в questions, а в
+findings ссылайся на них через question_key. Один блок — одна базовая логика
+(например, покупка или продажа); внутри него может быть несколько вопросов.
+
+Правила:
+- Находка — только процент 0–100%, характеризующий людей. Не извлекай деньги,
+  заказы, продажи, рынок, средний чек, темпы роста, прогнозы и абсолютные числа.
+- Знаменателем всегда должны быть люди. Всегда укажи, среди кого посчитан процент.
+  Ищи базу в подписи к вопросу,
+  графику и методологии, а не только в предложении с числом.
+- Не вычисляй проценты. parent_key связывает условную долю с базовой находкой;
+  если база складывается программой, parent_key равен composite_base_key.
+- Непересекающиеся ответы single_choice можно объединить, только когда это
+  подтверждено вопросом/шкалой: задай общий composite_base_key и отметь нужные
+  findings include_in_composite_base=true. Multiple choice не складывай.
+- Всероссийскую выборку 18+ из разных регионов можно обозначить как «взрослые
+  россияне», сохранив дословную методологическую цитату.
+- Период поведения укажи на уровне question. У дочернего вопроса используй
+  inherited, если период совпадает с родительской базой; отдельный отличный
+  период укажи как explicit.
+- evidence и все поля *_evidence — точные фрагменты исходного текста.
+- Не дублируй показатели. Один материал может дать от 0 до {max_findings} находок
+  в исходных findings.
+- Если подходящих долей людей нет: relevant=false, context с null, blocks=[].
+"""
+
 # Learned once per process. OpenRouter may advertise structured outputs for the
 # model while no currently routable provider accepts the strict parameter set.
 STRICT_JSON_SCHEMA_AVAILABLE = None
@@ -455,10 +601,92 @@ def parse_model_content(content, finish_reason=None):
     if not isinstance(answer, dict):
         raise ModelResponseError("структурированный ответ не является JSON-объектом")
     if not isinstance(answer.get("relevant"), bool) or not isinstance(
-        answer.get("findings"), list
+        answer.get("blocks"), list
     ):
-        raise ModelResponseError("в JSON отсутствуют корректные relevant/findings")
+        raise ModelResponseError("в JSON отсутствуют корректные relevant/blocks")
     return answer
+
+
+def expand_model_answer(answer):
+    """Expand compact v6 model output into the validated legacy finding shape."""
+    if not isinstance(answer, dict) or not isinstance(answer.get("blocks"), list):
+        return answer
+    context = answer.get("context") if isinstance(answer.get("context"), dict) else {}
+    expanded = []
+    for raw_block in answer["blocks"]:
+        if not isinstance(raw_block, dict):
+            expanded.append(raw_block)
+            continue
+        questions = {
+            item.get("question_key"): item
+            for item in raw_block.get("questions", [])
+            if isinstance(item, dict) and item.get("question_key")
+        }
+        for raw_finding in raw_block.get("findings", []):
+            if not isinstance(raw_finding, dict):
+                expanded.append(raw_finding)
+                continue
+            question = questions.get(raw_finding.get("question_key"), {})
+            audience = question.get("audience")
+            audience_evidence = question.get("audience_evidence")
+            base_kind = question.get("base_kind", "unknown")
+            expanded.append(
+                {
+                    "finding_key": raw_finding.get("finding_key"),
+                    "block_index": raw_block.get("block_index"),
+                    "block_title": raw_block.get("block_title"),
+                    "parent_key": raw_finding.get("parent_key"),
+                    "topic": raw_block.get("topic"),
+                    "indicator_type": raw_finding.get("indicator_type"),
+                    "ir_applicability": raw_finding.get("ir_applicability"),
+                    "geography": context.get("geography"),
+                    "audience": audience,
+                    "indicator": raw_finding.get("indicator"),
+                    "value": raw_finding.get("value"),
+                    "percent_base": question.get("percent_base"),
+                    "study_period": context.get("study_period"),
+                    "behavior_period": question.get("behavior_period"),
+                    "behavior_period_origin": question.get(
+                        "behavior_period_origin", "not_stated"
+                    ),
+                    "behavior_period_evidence": question.get("behavior_period_evidence"),
+                    "scale_key": question.get("scale_key"),
+                    "scale_category": raw_finding.get("scale_category"),
+                    "scale_choice_mode": question.get("scale_choice_mode", "unknown"),
+                    "scale_evidence": question.get("scale_evidence"),
+                    "composite_base_key": question.get("composite_base_key"),
+                    "composite_base_label": question.get("composite_base_label"),
+                    "composite_base_behavior_period": question.get(
+                        "composite_base_behavior_period"
+                    ),
+                    "include_in_composite_base": raw_finding.get(
+                        "include_in_composite_base"
+                    ) is True,
+                    "question_audience": audience,
+                    "question_audience_evidence": audience_evidence,
+                    "general_population": context.get("general_population"),
+                    "general_population_reason": context.get("general_population_reason"),
+                    "general_population_evidence": context.get(
+                        "general_population_evidence"
+                    ),
+                    "base_kind": base_kind,
+                    "base_reason": question.get("base_reason"),
+                    "methodology_evidence": context.get("methodology_evidence"),
+                    "targeting_criteria": raw_finding.get("targeting_criteria", []),
+                    "useful_for": question.get("useful_for"),
+                    "evidence": raw_finding.get("evidence"),
+                    "summary": raw_finding.get("summary"),
+                }
+            )
+    result = {
+        "relevant": answer.get("relevant") is True,
+        "findings": expanded,
+        "_raw_model_response": answer,
+    }
+    for meta in ("_response_meta", "_transport_meta"):
+        if meta in answer:
+            result[meta] = answer[meta]
+    return result
 
 
 def request_model_once(source, title, text, published_at, structured_mode):
@@ -1291,7 +1519,11 @@ def save_processing_audit(
             response_meta.get("structured_mode"),
             status,
             transport_meta.get("finish_reason"),
-            json.dumps(answer, ensure_ascii=False) if answer is not None else None,
+            json.dumps(
+                (answer or {}).get("_raw_model_response", answer), ensure_ascii=False
+            )
+            if answer is not None
+            else None,
             nullable_text(error, 1000),
             candidate_count,
             accepted_count,
@@ -1348,7 +1580,7 @@ def process_new(conn):
         answer = None
         validation_audit = []
         try:
-            answer = ask_model(source, title, text, published_at)
+            answer = expand_model_answer(ask_model(source, title, text, published_at))
             findings = calculate_derived_findings(
                 build_composite_bases(
                     validate_answer(answer, text or "", audit=validation_audit)
