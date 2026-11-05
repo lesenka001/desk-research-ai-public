@@ -14,12 +14,12 @@ import db
 SERVICE = "worker"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = os.environ.get("MODEL", "anthropic/claude-haiku-5.5")
-DEFAULT_PROMPT_VERSION = "audience-human-shares-v4"
+DEFAULT_PROMPT_VERSION = "audience-composite-bases-v5"
 PROMPT_VERSION = os.environ.get("PROMPT_VERSION", DEFAULT_PROMPT_VERSION)
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "10"))
 RETRY_SECONDS = int(os.environ.get("RETRY_SECONDS", "3600"))
 MAX_TEXT_CHARS = int(os.environ.get("MAX_TEXT_CHARS", "12000"))
-MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "6000"))
+MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "12000"))
 WORKER_BATCH_SIZE = int(os.environ.get("WORKER_BATCH_SIZE", "20"))
 MAX_FINDINGS_PER_MATERIAL = int(os.environ.get("MAX_FINDINGS_PER_MATERIAL", "20"))
 REPROCESS_OLD = os.environ.get("REPROCESS_OLD", "0").lower() in {"1", "true", "yes"}
