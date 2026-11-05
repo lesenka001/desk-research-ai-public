@@ -287,7 +287,10 @@ function renderDetail(f) {
   const same = f.summary.trim() === f.title.trim();
   const text = f.text ? esc(f.text) + (f.text.length >= 600 ? "…" : "") : "";
   const role = findingRole(f), summary = summaryWithoutValue(f);
-  const chain = (f.calculation_chain || []).map((step) => findings.find((item) => item.material_id === f.material_id && item.id !== null && item.finding_index === step.finding_index)).filter(Boolean);
+  const traceIndices = f.is_composite_base
+    ? (f.composite_component_indices || [])
+    : (f.calculation_chain || []).map((step) => step.finding_index);
+  const chain = traceIndices.map((findingIndex) => findings.find((item) => item.material_id === f.material_id && item.id !== null && item.finding_index === findingIndex)).filter((item) => item && item.id !== f.id);
   return `<article class="detail">
     <div class="bar">
       ${inTelegram ? `<span class="label">${esc(f.source)}</span>` : `<button class="back" data-back>← Лента</button>`}
@@ -313,12 +316,12 @@ function renderDetail(f) {
       ${f.useful_for ? `<p>${esc(f.useful_for)}</p>` : ""}
       ${f.evidence ? `<p class="excerpt">Подтверждение: «${esc(f.evidence)}»</p>` : ""}
     </div>
-    ${f.is_derived ? `<section class="trace">
-      <span class="label">Расчёт от базовой доли</span>
+    ${f.is_derived || f.is_composite_base ? `<section class="trace">
+      <span class="label">${f.is_composite_base ? "Расчёт составной базы" : "Расчёт от базовой доли"}</span>
       <h3>${esc(f.calculation_formula || "")}</h3>
       <div class="rec">
-        <p class="key">Исходная условная доля: ${esc(f.source_value || "—")}</p>
-        ${f.source_percent_base ? `<p class="key">Исходная база: ${esc(f.source_percent_base)}</p>` : ""}
+        ${f.is_derived ? `<p class="key">Исходная условная доля: ${esc(f.source_value || "—")}</p>` : ""}
+        ${f.is_derived && f.source_percent_base ? `<p class="key">Исходная база: ${esc(f.source_percent_base)}</p>` : ""}
         ${f.calculated_percent ? `<p class="key">Точный результат: ${esc(exactPercent(f.calculated_percent))}%</p>` : ""}
       </div>
       ${chain.map((item) => `<div class="rec"><span class="label">Шаг ${item.block_position}</span><p>${esc(item.source_value || item.value || "—")} · ${esc(item.summary)}</p>${item.evidence ? `<p class="excerpt">«${esc(item.evidence)}»</p>` : ""}</div>`).join("")}

@@ -613,7 +613,14 @@ def append_period(summary, period):
 def derived_summary(finding, root, displayed_value):
     audience = root.get("audience") or root.get("percent_base") or "респондентов исследования"
     indicator = finding.get("indicator") or finding.get("summary") or "имеют указанный признак"
-    period = finding.get("behavior_period") or root.get("behavior_period")
+    own_period = finding.get("behavior_period")
+    root_period = root.get("behavior_period")
+    period = (
+        own_period
+        if finding.get("behavior_period_origin") == "explicit"
+        and normalized(own_period) != normalized(root_period)
+        else None
+    )
     summary = f"{displayed_value} {audience} {indicator}".strip()
     return append_period(summary, period)
 

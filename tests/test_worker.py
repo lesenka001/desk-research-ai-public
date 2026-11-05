@@ -750,7 +750,7 @@ class DerivedCalculationTests(unittest.TestCase):
         )
         self.assertEqual(rows[1]["calculation_formula"], "38% × 33% = 12,54%")
         self.assertIn("населения России в возрасте 18+", rows[1]["summary"])
-        self.assertIn("за последние 6 месяцев", rows[1]["summary"])
+        self.assertNotIn("за последние 6 месяцев", rows[1]["summary"])
         self.assertEqual(rows[1]["source_value"], "33%")
 
     def test_calculates_multistep_chain(self):
@@ -928,6 +928,37 @@ class DerivedCalculationTests(unittest.TestCase):
         self.assertEqual(roles.count("base"), 4)
         self.assertEqual(roles.count("derived"), 10)
         self.assertEqual(roles.count("conditional"), 0)
+        self.assertTrue(
+            all(
+                "когда-либо" not in row["summary"]
+                for row in rows
+                if row["finding_role"] == "derived"
+            )
+        )
+
+    def test_derived_period_is_shown_only_when_explicit_and_different(self):
+        root = self.finding(1, "50%", behavior_period="когда-либо")
+        inherited = self.finding(
+            2,
+            "20%",
+            1,
+            "приобретали автомобиль",
+            behavior_period=None,
+            behavior_period_origin="inherited",
+        )
+        explicit = self.finding(
+            3,
+            "20%",
+            1,
+            "приобретали автомобиль",
+            behavior_period="за последний год",
+            behavior_period_origin="explicit",
+        )
+
+        rows = calculate_derived_findings([root, inherited, explicit])
+
+        self.assertNotIn("когда-либо", rows[1]["summary"])
+        self.assertIn("за последний год", rows[2]["summary"])
 
     def test_candidate_criteria_do_not_block_base_but_unlinked_share_is_conditional(self):
         candidate_root = self.finding(1, "38%", candidate_criteria=["income"])

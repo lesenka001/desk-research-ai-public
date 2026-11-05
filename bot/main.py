@@ -486,6 +486,7 @@ def page_data(conn):
         "geography",
         "study_period",
         "behavior_period",
+        "behavior_period_origin",
         "useful_for",
         "evidence",
         "source_value",
@@ -497,6 +498,8 @@ def page_data(conn):
         "base_reason",
         "methodology_evidence",
         "is_derived",
+        "is_composite_base",
+        "composite_component_indices",
         "targeting_criteria",
         "candidate_criteria",
         "title",
@@ -514,9 +517,11 @@ def page_data(conn):
     for row in conn.execute(
         "SELECT f.id, m.id, f.finding_index, f.summary, f.topic, f.value, f.block_index, f.block_position,"
         " f.block_title, f.parent_finding_index, f.indicator_type, f.ir_applicability, f.audience,"
-        " f.percent_base, f.geography, f.study_period, f.behavior_period, f.useful_for, f.evidence,"
+        " f.percent_base, f.geography, f.study_period, f.behavior_period,"
+        " f.behavior_period_origin, f.useful_for, f.evidence,"
         " f.source_value, f.source_percent_base, f.calculated_percent, f.calculation_formula,"
         " f.calculation_chain, f.base_kind, f.base_reason, f.methodology_evidence, f.is_derived,"
+        " f.is_composite_base, f.composite_component_indices,"
         " f.targeting_criteria, f.candidate_criteria,"
         " m.title, m.url, coalesce(m.published_at, m.collected_at), m.run_id,"
         " s.id, s.name, s.url, left(m.text, 600), f.sent_at, f.model"

@@ -343,11 +343,81 @@ class ViewTests(unittest.TestCase):
             ["base", "derived"],
         )
 
+    def test_control_article_shows_four_bases_ten_derivatives_and_no_duplicates(self):
+        rows = []
+
+        def add(value, role, block, position, summary):
+            finding_id = len(rows) + 1
+            rows.append(
+                {
+                    "id": finding_id,
+                    "material_id": 3,
+                    "finding_index": finding_id,
+                    "title": "Продажа и покупка подержанных товаров",
+                    "url": "https://example.org/second-hand",
+                    "source": "ФОМ",
+                    "block_index": block,
+                    "block_position": position,
+                    "block_title": "Покупка" if block == 1 else "Продажа",
+                    "parent_finding_index": None if role == "base" else 3,
+                    "summary": summary,
+                    "value": value,
+                    "base_kind": "targetable_inferred" if role == "base" else "conditional",
+                    "is_derived": role == "derived",
+                    "calculation_chain": (
+                        [{"finding_index": 3, "percent": "50"}, {"finding_index": finding_id, "percent": "1"}]
+                        if role == "derived"
+                        else [{"finding_index": finding_id, "percent": value.rstrip("%") }]
+                    ),
+                }
+            )
+
+        add("14%", "base", 1, 1, "Обычная практика покупки")
+        add("36%", "base", 1, 2, "Покупали несколько раз")
+        add("50%", "base", 1, 3, "Когда-либо приобретали подержанные товары")
+        for position, value, summary in (
+            (4, "10,5%", "Приобретали автомобили"),
+            (5, "7%", "Приобретали бытовую технику"),
+            (6, "7%", "Приобретали электронику"),
+            (7, "17,5%", "Покупали с целью экономии"),
+            (8, "16,5%", "Покупали через сайты объявлений"),
+        ):
+            add(value, "derived", 1, position, summary)
+        add("38%", "base", 2, 1, "Когда-либо продавали подержанные товары")
+        for position, value, summary in (
+            (2, "6%", "Продавали автомобили"),
+            (3, "4%", "Продавали бытовую технику"),
+            (4, "4%", "Продавали электронику"),
+            (5, "12%", "Продавали через сайты объявлений"),
+            (6, "9%", "Продавали с целью освободить место"),
+        ):
+            add(value, "derived", 2, position, summary)
+
+        groups = group_findings([dict(row) for row in rows])
+        roles = [
+            finding["finding_role"]
+            for block in groups[0]["blocks"]
+            for finding in block["findings"]
+        ]
+        digest, included = build_digest(rows, [("ФОМ", 14)], limit=10000)
+
+        self.assertEqual(roles.count("base"), 4)
+        self.assertEqual(roles.count("derived"), 10)
+        self.assertNotIn("conditional", roles)
+        self.assertEqual(len(included), 14)
+        self.assertEqual(digest.count("<b>Базовая:</b>"), 4)
+        self.assertEqual(digest.count("<b>Производная:</b>"), 10)
+        self.assertNotIn("Условная", digest)
+        for raw_duplicate in ("21%", "35%", "33%", "15%", "11%", "31%", "23%"):
+            self.assertNotIn(raw_duplicate, digest)
+
     def test_mini_app_template_contains_calculation_audit(self):
         template = (
             __import__("pathlib").Path(__file__).parents[1] / "bot" / "template.html"
         ).read_text(encoding="utf-8")
         self.assertIn("Расчёт от базовой доли", template)
+        self.assertIn("Расчёт составной базы", template)
+        self.assertIn("composite_component_indices", template)
         self.assertIn("calculation_formula", template)
         self.assertIn("candidate_criteria", template)
         self.assertIn("finding-block", template)
