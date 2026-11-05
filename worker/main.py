@@ -14,7 +14,8 @@ import db
 SERVICE = "worker"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = os.environ.get("MODEL", "anthropic/claude-haiku-5.5")
-PROMPT_VERSION = os.environ.get("PROMPT_VERSION", "audience-targetable-v3")
+DEFAULT_PROMPT_VERSION = "audience-human-shares-v4"
+PROMPT_VERSION = os.environ.get("PROMPT_VERSION", DEFAULT_PROMPT_VERSION)
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "10"))
 RETRY_SECONDS = int(os.environ.get("RETRY_SECONDS", "3600"))
 MAX_TEXT_CHARS = int(os.environ.get("MAX_TEXT_CHARS", "12000"))
