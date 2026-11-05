@@ -187,6 +187,17 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
       "percent_base": "дословная короткая формулировка знаменателя/базы процента из текста или null",
       "study_period": "период проведения исследования или null",
       "behavior_period": "период, срок или частота поведения, покупки или пользования или null",
+      "behavior_period_origin": "explicit | inherited | not_stated",
+      "behavior_period_evidence": "дословная цитата с собственным периодом/частотой показателя или null",
+      "scale_key": "общий ключ шкалы для взаимоисключающих категорий или null",
+      "scale_category": "название категории этой шкалы или null",
+      "scale_choice_mode": "single_choice | multiple_choice | unknown | not_applicable",
+      "scale_evidence": "дословная цитата, подтверждающая устройство шкалы/тип выбора, или null",
+      "question_audience": "кому именно задавался вопрос с этим показателем, или null",
+      "question_audience_evidence": "дословная цитата о том, кому задавался вопрос, или null",
+      "general_population": "генеральная совокупность, на которую можно распространить результат, или null",
+      "general_population_reason": "почему методология позволяет такую экстраполяцию, или null",
+      "general_population_evidence": "дословная цитата из методологии о выборке, или null",
       "base_kind": "targetable_explicit | targetable_inferred | conditional | unknown",
       "base_reason": "почему эта база определена именно так или null",
       "methodology_evidence": "дословная цитата из методологии, подтверждающая базу, или null",
@@ -219,6 +230,10 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
 - conditional используй для доли внутри поведенческой или иной нетаргетируемой группы. unknown — если база неясна.
 - В targeting_criteria перечисли id всех критериев, образующих базу. Новый возможный критерий дай коротким английским id: программа сохранит его кандидатом, но не одобрит автоматически.
 - behavior_period обязателен, когда в тексте указаны период, срок или частота покупки, продажи или пользования. Не заменяй им study_period исследования.
+- Для behavior_period_origin используй explicit, только если у текущего показателя прямо указан собственный период/частота; inherited — если он только наследуется от родительской базы; not_stated — если определить нельзя. Для explicit обязательна дословная behavior_period_evidence.
+- Категории одной шкалы частоты с одним вариантом ответа получат одинаковый scale_key, scale_choice_mode=single_choice и разные scale_category. Вопросы «любое число ответов» и иные множественные ответы помечай multiple_choice. Не называй шкалу single_choice только по догадке: приведи scale_evidence из формулировки, анкеты, подписи или структуры шкалы.
+- question_audience — люди, которым задавался конкретный вопрос. Фразу «вопрос задавался тем, кто покупал...» сохрани дословно в question_audience_evidence. Это не то же самое, что генеральная совокупность исследования.
+- general_population заполняй как «взрослые россияне» только когда методология подтверждает всероссийскую выборку 18+ из разных регионов/населенных пунктов. Обязательны general_population_reason и дословная general_population_evidence. Иначе оставь эти поля null.
 - value обязано быть процентом от 0% до 100%. evidence должна быть дословным фрагментом переданного текста и подтверждать значение и человеческую аудиторию. Если процентной характеристики людей нет, не создавай находку.
 - Дата публикации не является периодом исследования.
 - Если пригодной статистики нет, relevant=false и findings=[].
@@ -246,6 +261,23 @@ FINDING_JSON_SCHEMA = {
         "percent_base": {"type": ["string", "null"]},
         "study_period": {"type": ["string", "null"]},
         "behavior_period": {"type": ["string", "null"]},
+        "behavior_period_origin": {
+            "type": "string",
+            "enum": ["explicit", "inherited", "not_stated"],
+        },
+        "behavior_period_evidence": {"type": ["string", "null"]},
+        "scale_key": {"type": ["string", "null"]},
+        "scale_category": {"type": ["string", "null"]},
+        "scale_choice_mode": {
+            "type": "string",
+            "enum": ["single_choice", "multiple_choice", "unknown", "not_applicable"],
+        },
+        "scale_evidence": {"type": ["string", "null"]},
+        "question_audience": {"type": ["string", "null"]},
+        "question_audience_evidence": {"type": ["string", "null"]},
+        "general_population": {"type": ["string", "null"]},
+        "general_population_reason": {"type": ["string", "null"]},
+        "general_population_evidence": {"type": ["string", "null"]},
         "base_kind": {
             "type": "string",
             "enum": ["targetable_explicit", "targetable_inferred", "conditional", "unknown"],
@@ -276,6 +308,17 @@ FINDING_JSON_SCHEMA = {
         "percent_base",
         "study_period",
         "behavior_period",
+        "behavior_period_origin",
+        "behavior_period_evidence",
+        "scale_key",
+        "scale_category",
+        "scale_choice_mode",
+        "scale_evidence",
+        "question_audience",
+        "question_audience_evidence",
+        "general_population",
+        "general_population_reason",
+        "general_population_evidence",
         "base_kind",
         "base_reason",
         "methodology_evidence",
@@ -704,6 +747,13 @@ def validate_answer(answer, text):
         "conditional",
         "unknown",
     }
+    scale_choice_modes = {
+        "single_choice",
+        "multiple_choice",
+        "unknown",
+        "not_applicable",
+    }
+    behavior_period_origins = {"explicit", "inherited", "not_stated"}
     for position, raw in enumerate(findings[:MAX_FINDINGS_PER_MATERIAL], 1):
         if not isinstance(raw, dict):
             continue
@@ -735,6 +785,59 @@ def validate_answer(answer, text):
         methodology_evidence = nullable_text(raw.get("methodology_evidence"), 700)
         if methodology_evidence and not evidence_is_verbatim(methodology_evidence, text):
             methodology_evidence = None
+        scale_evidence = nullable_text(raw.get("scale_evidence"), 700)
+        if scale_evidence and not evidence_is_verbatim(scale_evidence, text):
+            scale_evidence = None
+        scale_choice_mode = raw.get("scale_choice_mode")
+        if scale_choice_mode not in scale_choice_modes:
+            scale_choice_mode = "unknown"
+        scale_key = nullable_text(raw.get("scale_key"), 100)
+        scale_category = nullable_text(raw.get("scale_category"), 300)
+        if (
+            scale_choice_mode in {"single_choice", "multiple_choice"}
+            and (not scale_key or not scale_category or not scale_evidence)
+        ):
+            scale_choice_mode = "unknown"
+        question_audience_evidence = nullable_text(
+            raw.get("question_audience_evidence"), 700
+        )
+        if question_audience_evidence and not evidence_is_verbatim(
+            question_audience_evidence, text
+        ):
+            question_audience_evidence = None
+        question_audience = nullable_text(raw.get("question_audience"), 500)
+        if question_audience and not question_audience_evidence:
+            question_audience = None
+        general_population_evidence = nullable_text(
+            raw.get("general_population_evidence"), 700
+        )
+        if general_population_evidence and not evidence_is_verbatim(
+            general_population_evidence, text
+        ):
+            general_population_evidence = None
+        general_population = nullable_text(raw.get("general_population"), 500)
+        general_population_reason = nullable_text(
+            raw.get("general_population_reason"), 700
+        )
+        if general_population and (
+            not general_population_reason or not general_population_evidence
+        ):
+            general_population = None
+            general_population_reason = None
+        behavior_period = nullable_text(raw.get("behavior_period"), 300)
+        behavior_period_origin = raw.get("behavior_period_origin")
+        if behavior_period_origin not in behavior_period_origins:
+            behavior_period_origin = "explicit" if behavior_period else "not_stated"
+        behavior_period_evidence = nullable_text(
+            raw.get("behavior_period_evidence"), 700
+        )
+        if behavior_period_evidence and not evidence_is_verbatim(
+            behavior_period_evidence, text
+        ):
+            behavior_period_evidence = None
+        if behavior_period_origin == "explicit" and not behavior_period_evidence:
+            # Backward-compatible answers may predate the explicit evidence field.
+            behavior_period_evidence = evidence if behavior_period else None
         base_kind = raw.get("base_kind")
         if base_kind not in base_kinds:
             base_kind = "unknown"
@@ -790,7 +893,18 @@ def validate_answer(answer, text):
                 "value": value,
                 "percent_base": percent_base,
                 "study_period": nullable_text(raw.get("study_period"), 300),
-                "behavior_period": nullable_text(raw.get("behavior_period"), 300),
+                "behavior_period": behavior_period,
+                "behavior_period_origin": behavior_period_origin,
+                "behavior_period_evidence": behavior_period_evidence,
+                "scale_key": scale_key,
+                "scale_category": scale_category,
+                "scale_choice_mode": scale_choice_mode,
+                "scale_evidence": scale_evidence,
+                "question_audience": question_audience,
+                "question_audience_evidence": question_audience_evidence,
+                "general_population": general_population,
+                "general_population_reason": general_population_reason,
+                "general_population_evidence": general_population_evidence,
                 "base_kind": base_kind,
                 "base_reason": base_reason,
                 "methodology_evidence": methodology_evidence,
@@ -839,13 +953,18 @@ def save_result(conn, material_id, findings):
                        (material_id, finding_index, block_index, block_position, block_title,
                         parent_finding_index, topic, indicator_type, ir_applicability, geography,
                         audience, indicator, value, percent_base, study_period, behavior_period,
-                        useful_for, evidence, summary, source_value, source_percent_base,
+                        behavior_period_origin, behavior_period_evidence, scale_key, scale_category,
+                        scale_choice_mode, scale_evidence, question_audience,
+                        question_audience_evidence, general_population, general_population_reason,
+                        general_population_evidence, useful_for, evidence, summary, source_value,
+                        source_percent_base,
                         calculated_percent, calculation_formula, calculation_chain, base_kind,
                         base_reason, methodology_evidence, is_derived, targeting_criteria,
                         candidate_criteria, model, prompt_version)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                           %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s::jsonb,
+                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                           %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s::jsonb,
                            %s::jsonb, %s, %s)
                    ON CONFLICT (material_id, prompt_version, finding_index) DO NOTHING""",
                 (
@@ -865,6 +984,17 @@ def save_result(conn, material_id, findings):
                     finding["percent_base"],
                     finding["study_period"],
                     finding["behavior_period"],
+                    finding.get("behavior_period_origin"),
+                    finding.get("behavior_period_evidence"),
+                    finding.get("scale_key"),
+                    finding.get("scale_category"),
+                    finding.get("scale_choice_mode"),
+                    finding.get("scale_evidence"),
+                    finding.get("question_audience"),
+                    finding.get("question_audience_evidence"),
+                    finding.get("general_population"),
+                    finding.get("general_population_reason"),
+                    finding.get("general_population_evidence"),
                     finding["useful_for"],
                     finding["evidence"],
                     finding["summary"],

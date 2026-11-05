@@ -355,6 +355,10 @@ class TargetingCriteriaTests(unittest.TestCase):
             "calculation_chain",
             "targeting_criteria",
             "candidate_criteria",
+            "scale_choice_mode",
+            "question_audience",
+            "general_population",
+            "behavior_period_origin",
         ):
             self.assertIn(
                 f"ADD COLUMN IF NOT EXISTS {column}", schema
@@ -371,6 +375,152 @@ class FindingBlockExtractionTests(unittest.TestCase):
         self.assertIn("знаменателем всегда должны быть люди", prompt.lower())
         self.assertNotIn("absolute_count", prompt)
         self.assertNotIn("market_metric", prompt)
+
+        strict_body = model_request_body(
+            "ФОМ", "Тест", "Текст", None, "json_schema"
+        )
+        finding_schema = strict_body["response_format"]["json_schema"]["schema"][
+            "properties"
+        ]["findings"]["items"]
+        for field in (
+            "scale_key",
+            "scale_category",
+            "scale_choice_mode",
+            "scale_evidence",
+            "question_audience",
+            "question_audience_evidence",
+            "general_population",
+            "general_population_reason",
+            "general_population_evidence",
+            "behavior_period_origin",
+            "behavior_period_evidence",
+        ):
+            self.assertIn(field, finding_schema["required"])
+
+    def test_extracts_scale_question_audiences_and_general_population(self):
+        methodology = (
+            "«ФОМнибус» – всероссийский опрос россиян в возрасте 18 лет и старше, "
+            "51 субъект РФ, 97 населенных пунктов."
+        )
+        frequency = (
+            "Обычной практикой покупку подержанных товаров называют 14% опрошенных, "
+            "еще 36% приобретали их несколько раз."
+        )
+        buyer_question = (
+            "Вопрос задавался тем, кто покупал подержанные товары, – отвечали 50% "
+            "респондентов. Карточка, любое число ответов."
+        )
+        seller_question = (
+            "Вопрос задавался тем, кто продавал подержанные товары. Карточка, "
+            "любое число ответов."
+        )
+        text = " ".join(
+            (
+                methodology,
+                frequency,
+                buyer_question,
+                "Автомобили покупали 21% покупателей.",
+                "Подержанные товары продавали 38% респондентов.",
+                seller_question,
+                "Автомобили продавали 15% продавцов.",
+            )
+        )
+
+        def finding(key, value, evidence, **overrides):
+            row = {
+                "finding_key": key,
+                "block_index": 1,
+                "block_title": "Покупка",
+                "parent_key": None,
+                "topic": "подержанные товары",
+                "indicator_type": "population_share",
+                "ir_applicability": "direct",
+                "audience": "взрослые россияне",
+                "value": value,
+                "percent_base": "опрошенных",
+                "behavior_period_origin": "not_stated",
+                "scale_choice_mode": "not_applicable",
+                "general_population": "взрослые россияне",
+                "general_population_reason": "всероссийская выборка людей 18+",
+                "general_population_evidence": methodology,
+                "evidence": evidence,
+                "summary": evidence,
+            }
+            row.update(overrides)
+            return row
+
+        scale_fields = {
+            "scale_key": "second_hand_purchase_frequency",
+            "scale_choice_mode": "single_choice",
+            "scale_evidence": frequency,
+        }
+        answer = {
+            "relevant": True,
+            "findings": [
+                finding(
+                    "regular_buyers",
+                    "14%",
+                    frequency,
+                    **scale_fields,
+                    scale_category="обычная практика",
+                ),
+                finding(
+                    "several_times_buyers",
+                    "36%",
+                    frequency,
+                    **scale_fields,
+                    scale_category="приобретали несколько раз",
+                ),
+                finding(
+                    "buyer_cars",
+                    "21%",
+                    "Автомобили покупали 21% покупателей.",
+                    parent_key=None,
+                    indicator_type="conditional_share",
+                    audience="покупатели подержанных товаров",
+                    percent_base="покупателей",
+                    scale_key="purchased_categories",
+                    scale_category="автомобили",
+                    scale_choice_mode="multiple_choice",
+                    scale_evidence=buyer_question,
+                    question_audience="покупатели подержанных товаров",
+                    question_audience_evidence=buyer_question,
+                ),
+                finding(
+                    "sellers",
+                    "38%",
+                    "Подержанные товары продавали 38% респондентов.",
+                    block_index=2,
+                    block_title="Продажа",
+                ),
+                finding(
+                    "seller_cars",
+                    "15%",
+                    "Автомобили продавали 15% продавцов.",
+                    block_index=2,
+                    block_title="Продажа",
+                    indicator_type="conditional_share",
+                    audience="продавцы подержанных товаров",
+                    percent_base="продавцов",
+                    scale_key="sold_categories",
+                    scale_category="автомобили",
+                    scale_choice_mode="multiple_choice",
+                    scale_evidence=seller_question,
+                    question_audience="продавцы подержанных товаров",
+                    question_audience_evidence=seller_question,
+                ),
+            ],
+        }
+
+        rows = validate_answer(answer, text)
+
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(rows[0]["scale_key"], rows[1]["scale_key"])
+        self.assertEqual(rows[0]["scale_choice_mode"], "single_choice")
+        self.assertEqual(rows[2]["scale_choice_mode"], "multiple_choice")
+        self.assertEqual(rows[2]["question_audience"], "покупатели подержанных товаров")
+        self.assertEqual(rows[4]["question_audience"], "продавцы подержанных товаров")
+        self.assertTrue(all(row["general_population"] == "взрослые россияне" for row in rows))
 
     def test_extracts_two_blocks_with_parent_links_and_periods(self):
         text = (
