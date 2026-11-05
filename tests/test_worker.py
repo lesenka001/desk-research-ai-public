@@ -1025,6 +1025,127 @@ class DerivedCalculationTests(unittest.TestCase):
 
 
 class CompactV6ContractTests(unittest.TestCase):
+    def test_openrouter_json_object_shape_is_normalized_and_deduplicated(self):
+        methodology = (
+            "Всероссийский поквартирный опрос россиян 18 лет и старше, "
+            "51 субъект РФ, 1500 респондентов."
+        )
+        frequency = (
+            "Обычной практикой покупку называют 14% опрошенных, "
+            "еще 36% приобретали товары несколько раз."
+        )
+        buyer_question = (
+            "Вопрос задавался покупателям подержанных товаров — отвечали 50% "
+            "респондентов."
+        )
+        car_evidence = "Автомобили покупали 21% покупателей подержанных товаров."
+        text = "\n".join([methodology, frequency, buyer_question, car_evidence])
+        answer = {
+            "relevant": True,
+            "context": {
+                "population_label": "взрослые россияне",
+                "population_evidence": methodology,
+                "method": "всероссийский поквартирный опрос",
+                "method_evidence": methodology,
+                "fieldwork_period": None,
+            },
+            "blocks": [
+                {
+                    "block_key": "purchase_used_goods",
+                    "logic": "покупка подержанных товаров",
+                    "questions": [
+                        {
+                            "question_key": "purchase_experience",
+                            "question_text": frequency,
+                            "denominator": {
+                                "type": "people",
+                                "label": "опрошенные",
+                                "evidence": frequency,
+                            },
+                            "period": {"type": "inherited", "label": "когда-либо"},
+                            "scale": {"type": "single_choice", "unit": "% от людей"},
+                        },
+                        {
+                            "question_key": "purchase_goods",
+                            "question_text": buyer_question,
+                            "denominator": {
+                                "type": "people",
+                                "label": "покупатели подержанных товаров",
+                                "evidence": buyer_question,
+                            },
+                            "period": {"type": "inherited", "label": "когда-либо"},
+                            "scale": {"type": "multiple_choice", "unit": "% от людей"},
+                        },
+                    ],
+                    "findings": [
+                        {
+                            "finding_key": "purchase_regular_practice",
+                            "question_key": "purchase_experience",
+                            "parent_key": None,
+                            "value": 14,
+                            "unit": "%",
+                            "evidence": frequency,
+                            "denominator": None,
+                            "composite_base_key": "purchase_experience_composite",
+                            "include_in_composite_base": True,
+                        },
+                        {
+                            "finding_key": "purchase_repeated",
+                            "question_key": "purchase_experience",
+                            "parent_key": None,
+                            "value": 36,
+                            "unit": "%",
+                            "evidence": frequency,
+                            "denominator": None,
+                            "composite_base_key": "purchase_experience_composite",
+                            "include_in_composite_base": True,
+                        },
+                        {
+                            "finding_key": "purchase_buyers_share",
+                            "question_key": "purchase_goods",
+                            "parent_key": None,
+                            "value": 50,
+                            "unit": "%",
+                            "evidence": buyer_question,
+                            "denominator": None,
+                            "composite_base_key": None,
+                            "include_in_composite_base": False,
+                        },
+                        {
+                            "finding_key": "purchase_goods_cars",
+                            "question_key": "purchase_goods",
+                            "parent_key": "purchase_buyers_share",
+                            "value": 21,
+                            "unit": "%",
+                            "evidence": car_evidence,
+                            "denominator": None,
+                            "composite_base_key": None,
+                            "include_in_composite_base": False,
+                        },
+                    ],
+                }
+            ],
+        }
+
+        expanded = expand_model_answer(answer)
+        self.assertEqual([item["value"] for item in expanded["findings"]], ["14%", "36%", "21%"])
+        self.assertTrue(all(item["summary"] for item in expanded["findings"]))
+        self.assertEqual(
+            expanded["findings"][2]["parent_key"], "purchase_experience_composite"
+        )
+
+        audit = []
+        validated = validate_answer(expanded, text, audit=audit)
+        self.assertTrue(all(item["accepted"] for item in audit), audit)
+        self.assertEqual(
+            [(item["scale_choice_mode"], item["composite_base_key"], item["include_in_composite_base"], item["base_kind"])
+             for item in validated[:2]],
+            [("single_choice", "purchase_experience_composite", True, "targetable_inferred")] * 2,
+        )
+        rows = calculate_derived_findings(build_composite_bases(validated))
+        self.assertEqual([row["value"] for row in rows], ["14%", "36%", "50%", "10,5%"])
+        self.assertEqual([row["finding_role"] for row in rows], ["base", "base", "base", "derived"])
+
     def test_full_control_article_expands_validates_and_calculates_four_by_ten(self):
         methodology = (
             "«ФОМнибус» – еженедельный всероссийский поквартирный опрос россиян "

@@ -479,6 +479,11 @@ PROMPT = """Ты извлекаешь только процентные доли
 Внутри блока вынеси повторяющийся знаменатель, период и шкалу в questions, а в
 findings ссылайся на них через question_key. Один блок — одна базовая логика
 (например, покупка или продажа); внутри него может быть несколько вопросов.
+Даже в режиме json_object используй точные имена полей схемы. Не создавай поля
+logic, block_key, denominator, period, scale или unit как вложенные объекты.
+Значение value всегда строка со знаком процента, например "14%". У каждой
+findings обязательны непустые summary, indicator и evidence. Повторяющийся
+контекст заполняй в context и questions через поля схемы, а не новым форматом.
 
 Правила:
 - Находка — только процент 0–100%, характеризующий людей. Не извлекай деньги,
@@ -612,8 +617,57 @@ def expand_model_answer(answer):
     if not isinstance(answer, dict) or not isinstance(answer.get("blocks"), list):
         return answer
     context = answer.get("context") if isinstance(answer.get("context"), dict) else {}
+    general_population = context.get("general_population") or context.get("population_label")
+    general_population_evidence = (
+        context.get("general_population_evidence")
+        or context.get("population_evidence")
+        or context.get("sample_evidence")
+    )
+    methodology_evidence = (
+        context.get("methodology_evidence")
+        or context.get("method_evidence")
+        or general_population_evidence
+    )
+
+    def nested_text(value, *keys):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            for key in keys:
+                item = value.get(key)
+                if isinstance(item, str) and item.strip():
+                    return item.strip()
+        return None
+
+    def percent_value(raw):
+        value = raw.get("value")
+        if isinstance(value, (int, float, Decimal)) and "%" in str(raw.get("unit", "%")):
+            return f"{format_decimal(Decimal(str(value)))}%"
+        if isinstance(value, str):
+            value = value.strip()
+            if "%" not in value and "%" in str(raw.get("unit", "")):
+                value += "%"
+            return value
+        return value
+
+    def indicator_from_evidence(evidence, value, fallback):
+        if not evidence:
+            return fallback
+        number = str(value or "").replace("%", "").replace(",", r"[,.]")
+        phrase = re.sub(rf"(?<!\d){number}\s*%?", "", evidence, count=1)
+        phrase = re.sub(r"\s+", " ", phrase).strip(" .,:;–—-()")
+        return phrase[:500] or fallback
+
+    def composite_label(logic):
+        population = general_population or "респондентов"
+        logic = (logic or "имеют указанный опыт").strip()
+        lowered = logic.lower()
+        if lowered.startswith("покупка "):
+            return f"{population} когда-либо покупали {logic[len('покупка '):]}"
+        return f"{population} {logic}"
+
     expanded = []
-    for raw_block in answer["blocks"]:
+    for block_number, raw_block in enumerate(answer["blocks"], 1):
         if not isinstance(raw_block, dict):
             expanded.append(raw_block)
             continue
@@ -622,60 +676,131 @@ def expand_model_answer(answer):
             for item in raw_block.get("questions", [])
             if isinstance(item, dict) and item.get("question_key")
         }
+        raw_findings = raw_block.get("findings", [])
+        aliases = {}
+        component_groups = {}
+        for item in raw_findings:
+            if not isinstance(item, dict) or item.get("include_in_composite_base") is not True:
+                continue
+            key = item.get("composite_base_key")
+            value = parse_percent(percent_value(item))
+            if key and value is not None:
+                component_groups.setdefault(key, []).append((item, value))
+        referenced_keys = {
+            item.get("parent_key") for item in raw_findings if isinstance(item, dict)
+        }
+        for composite_key, components in component_groups.items():
+            if len(components) < 2:
+                continue
+            total = sum((value for _, value in components), Decimal("0"))
+            for item in raw_findings:
+                if not isinstance(item, dict) or item.get("include_in_composite_base") is True:
+                    continue
+                item_key = item.get("finding_key")
+                if (
+                    item_key in referenced_keys
+                    and parse_percent(percent_value(item)) == total
+                ):
+                    aliases[item_key] = composite_key
+                    break
         for raw_finding in raw_block.get("findings", []):
             if not isinstance(raw_finding, dict):
                 expanded.append(raw_finding)
                 continue
+            if raw_finding.get("finding_key") in aliases:
+                continue
             question = questions.get(raw_finding.get("question_key"), {})
-            audience = question.get("audience")
-            audience_evidence = question.get("audience_evidence")
-            base_kind = question.get("base_kind", "unknown")
+            denominator = raw_finding.get("denominator") or question.get("denominator")
+            audience = question.get("audience") or nested_text(
+                denominator, "label", "audience", "population_label", "text", "value"
+            )
+            audience_evidence = question.get("audience_evidence") or nested_text(
+                denominator, "evidence", "quote", "source"
+            ) or question.get("question_text")
+            percent_base = question.get("percent_base") or audience_evidence or audience
+            parent_key = aliases.get(raw_finding.get("parent_key"), raw_finding.get("parent_key"))
+            base_kind = question.get("base_kind")
+            if not base_kind:
+                base_kind = (
+                    "conditional" if parent_key else
+                    "targetable_inferred" if general_population else "unknown"
+                )
+            scale = question.get("scale") if isinstance(question.get("scale"), dict) else {}
+            scale_mode = question.get("scale_choice_mode") or scale.get("type") or "unknown"
+            if str(scale_mode).startswith("multiple_choice"):
+                scale_mode = "multiple_choice"
+            period = question.get("period") if isinstance(question.get("period"), dict) else {}
+            behavior_period = question.get("behavior_period") or nested_text(
+                period, "label", "value", "text"
+            )
+            behavior_origin = question.get("behavior_period_origin") or period.get("type")
+            if behavior_origin not in {"explicit", "inherited", "not_stated"}:
+                behavior_origin = "not_stated"
+            behavior_evidence = question.get("behavior_period_evidence") or nested_text(
+                period, "evidence", "quote", "source"
+            )
+            value = percent_value(raw_finding)
+            evidence = raw_finding.get("evidence")
+            indicator = raw_finding.get("indicator") or indicator_from_evidence(
+                evidence, value, question.get("question_text") or raw_finding.get("finding_key")
+            )
+            composite_key = (
+                raw_finding.get("composite_base_key")
+                or question.get("composite_base_key")
+            )
+            summary = raw_finding.get("summary") or f"{value} {indicator}".strip()
             expanded.append(
                 {
                     "finding_key": raw_finding.get("finding_key"),
-                    "block_index": raw_block.get("block_index"),
-                    "block_title": raw_block.get("block_title"),
-                    "parent_key": raw_finding.get("parent_key"),
-                    "topic": raw_block.get("topic"),
-                    "indicator_type": raw_finding.get("indicator_type"),
-                    "ir_applicability": raw_finding.get("ir_applicability"),
+                    "block_index": raw_block.get("block_index") or block_number,
+                    "block_title": raw_block.get("block_title") or raw_block.get("logic"),
+                    "parent_key": parent_key,
+                    "topic": raw_block.get("topic") or raw_block.get("logic"),
+                    "indicator_type": raw_finding.get("indicator_type") or (
+                        "conditional_share" if parent_key else "population_share"
+                    ),
+                    "ir_applicability": raw_finding.get("ir_applicability") or "direct",
                     "geography": context.get("geography"),
                     "audience": audience,
-                    "indicator": raw_finding.get("indicator"),
-                    "value": raw_finding.get("value"),
-                    "percent_base": question.get("percent_base"),
-                    "study_period": context.get("study_period"),
-                    "behavior_period": question.get("behavior_period"),
-                    "behavior_period_origin": question.get(
-                        "behavior_period_origin", "not_stated"
+                    "indicator": indicator,
+                    "value": value,
+                    "percent_base": percent_base,
+                    "study_period": context.get("study_period") or context.get("fieldwork_period"),
+                    "behavior_period": behavior_period,
+                    "behavior_period_origin": behavior_origin,
+                    "behavior_period_evidence": behavior_evidence,
+                    "scale_key": question.get("scale_key") or (
+                        raw_finding.get("question_key") if scale_mode != "not_applicable" else None
                     ),
-                    "behavior_period_evidence": question.get("behavior_period_evidence"),
-                    "scale_key": question.get("scale_key"),
-                    "scale_category": raw_finding.get("scale_category"),
-                    "scale_choice_mode": question.get("scale_choice_mode", "unknown"),
-                    "scale_evidence": question.get("scale_evidence"),
-                    "composite_base_key": question.get("composite_base_key"),
-                    "composite_base_label": question.get("composite_base_label"),
+                    "scale_category": raw_finding.get("scale_category") or indicator,
+                    "scale_choice_mode": scale_mode,
+                    "scale_evidence": question.get("scale_evidence") or question.get("question_text"),
+                    "composite_base_key": composite_key,
+                    "composite_base_label": question.get("composite_base_label") or (
+                        composite_label(raw_block.get("logic")) if composite_key else None
+                    ),
                     "composite_base_behavior_period": question.get(
                         "composite_base_behavior_period"
-                    ),
+                    ) or behavior_period,
                     "include_in_composite_base": raw_finding.get(
                         "include_in_composite_base"
                     ) is True,
                     "question_audience": audience,
                     "question_audience_evidence": audience_evidence,
-                    "general_population": context.get("general_population"),
-                    "general_population_reason": context.get("general_population_reason"),
-                    "general_population_evidence": context.get(
-                        "general_population_evidence"
-                    ),
+                    "general_population": general_population,
+                    "general_population_reason": context.get("general_population_reason") or context.get("method"),
+                    "general_population_evidence": general_population_evidence,
                     "base_kind": base_kind,
-                    "base_reason": question.get("base_reason"),
-                    "methodology_evidence": context.get("methodology_evidence"),
+                    "base_reason": question.get("base_reason") or (
+                        context.get("general_population_reason") or context.get("method")
+                        if base_kind == "targetable_inferred"
+                        else None
+                    ),
+                    "methodology_evidence": methodology_evidence,
                     "targeting_criteria": raw_finding.get("targeting_criteria", []),
                     "useful_for": question.get("useful_for"),
-                    "evidence": raw_finding.get("evidence"),
-                    "summary": raw_finding.get("summary"),
+                    "evidence": evidence,
+                    "summary": summary,
                 }
             )
     result = {
