@@ -743,7 +743,7 @@ class DerivedCalculationTests(unittest.TestCase):
             [row["calculated_percent"] for row in rows[1:]],
             [Decimal("12.54"), Decimal("13.3"), Decimal("7.98")],
         )
-        self.assertEqual([row["value"] for row in rows], ["38%", "13%", "13%", "8%"])
+        self.assertEqual([row["value"] for row in rows], ["38%", "12,5%", "13%", "8%"])
         self.assertEqual(
             [row["finding_role"] for row in rows],
             ["base", "derived", "derived", "derived"],
@@ -814,6 +814,120 @@ class DerivedCalculationTests(unittest.TestCase):
             ),
         ]
         self.assertEqual(len(build_composite_bases(multiple)), 2)
+
+    def test_control_article_links_composite_parent_and_rounds_ten_derivatives(self):
+        component_common = {
+            "behavior_period": None,
+            "scale_key": "purchase_frequency",
+            "scale_choice_mode": "single_choice",
+            "scale_evidence": "единая шкала частоты",
+            "composite_base_key": "ever_bought",
+            "composite_base_label": (
+                "взрослых россиян когда-либо приобретали подержанные товары"
+            ),
+            "composite_base_behavior_period": "когда-либо",
+            "include_in_composite_base": True,
+            "general_population": "взрослые россияне",
+            "general_population_reason": "всероссийская выборка 18+",
+            "general_population_evidence": "всероссийский опрос 18+",
+            "base_kind": "targetable_inferred",
+        }
+        findings = [
+            self.finding(1, "14%", scale_category="обычная практика", **component_common),
+            self.finding(2, "36%", scale_category="несколько раз", **component_common),
+        ]
+        for index, value, indicator in (
+            (3, "21%", "приобретали подержанные автомобили"),
+            (4, "14%", "приобретали подержанную бытовую технику"),
+            (5, "14%", "приобретали подержанную электронику"),
+            (6, "35%", "покупали с целью экономии"),
+            (7, "33%", "покупали через сайты объявлений"),
+        ):
+            findings.append(
+                self.finding(
+                    index,
+                    value,
+                    None,
+                    indicator,
+                    parent_key="ever_bought",
+                    indicator_type="conditional_share",
+                    base_kind="conditional",
+                    audience="покупатели подержанных товаров",
+                    percent_base="покупатели подержанных товаров",
+                    behavior_period=None,
+                )
+            )
+        findings.append(
+            self.finding(
+                8,
+                "38%",
+                block_index=2,
+                block_position=1,
+                block_title="Продажа",
+                behavior_period="когда-либо",
+            )
+        )
+        for index, value, indicator in (
+            (9, "15%", "продавали подержанные автомобили"),
+            (10, "11%", "продавали подержанную бытовую технику"),
+            (11, "10%", "продавали подержанную электронику"),
+            (12, "31%", "продавали через сайты объявлений"),
+            (13, "23%", "продавали с целью освободить место"),
+        ):
+            findings.append(
+                self.finding(
+                    index,
+                    value,
+                    8,
+                    indicator,
+                    block_index=2,
+                    block_position=index - 7,
+                    block_title="Продажа",
+                    behavior_period=None,
+                )
+            )
+
+        rows = calculate_derived_findings(build_composite_bases(findings))
+
+        self.assertEqual(len(rows), 14)
+        self.assertEqual(
+            [row["value"] for row in rows],
+            [
+                "14%",
+                "36%",
+                "50%",
+                "10,5%",
+                "7%",
+                "7%",
+                "17,5%",
+                "16,5%",
+                "38%",
+                "6%",
+                "4%",
+                "4%",
+                "12%",
+                "9%",
+            ],
+        )
+        self.assertEqual(
+            [row["calculated_percent"] for row in rows[3:8] + rows[9:]],
+            [
+                Decimal("10.5"),
+                Decimal("7"),
+                Decimal("7"),
+                Decimal("17.5"),
+                Decimal("16.5"),
+                Decimal("5.7"),
+                Decimal("4.18"),
+                Decimal("3.8"),
+                Decimal("11.78"),
+                Decimal("8.74"),
+            ],
+        )
+        roles = [row["finding_role"] for row in rows]
+        self.assertEqual(roles.count("base"), 4)
+        self.assertEqual(roles.count("derived"), 10)
+        self.assertEqual(roles.count("conditional"), 0)
 
     def test_candidate_criteria_do_not_block_base_but_unlinked_share_is_conditional(self):
         candidate_root = self.finding(1, "38%", candidate_criteria=["income"])

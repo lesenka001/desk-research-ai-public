@@ -6,7 +6,7 @@ import re
 import time
 import urllib.error
 import urllib.request
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_UP
 from pathlib import Path
 
 import db
@@ -220,6 +220,7 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
 - Один материал может дать от 0 до {max_findings} находок. Не дублируй один показатель разными формулировками.
 - Сначала раздели находки одной страницы на смысловые блоки. В каждом блоке первая находка — базовая доля, остальные — уточнения внутри аудитории предыдущей находки.
 - finding_key уникален внутри материала. parent_key указывает на непосредственную родительскую находку того же блока. У базовой находки parent_key=null.
+- Если родительская база будет создана программой из категорий шкалы, укажи в parent_key ее composite_base_key.
 - block_index начинается с 1. Для разных базовых измерений, например «покупали» и «продавали», используй разные блоки.
 - Базовую находку каждого блока ставь раньше дочерних. Не связывай показатели, если вложенность знаменателей неоднозначна.
 - population_share — только доля от всего населения либо широкой демографической базы, заданной лишь географией, полом или возрастом.
@@ -592,6 +593,17 @@ def format_decimal(value):
     return rendered.replace(".", ",")
 
 
+def display_percent(value):
+    """Apply the product rule: low fractions down, middle to .5, high up."""
+    whole = value.quantize(Decimal("1"), rounding=ROUND_FLOOR)
+    fraction = (value - whole).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if fraction <= Decimal("0.40"):
+        return whole
+    if fraction <= Decimal("0.59"):
+        return whole + Decimal("0.5")
+    return whole + Decimal("1")
+
+
 def append_period(summary, period):
     if not period or normalized(period) in normalized(summary):
         return summary
@@ -721,6 +733,15 @@ def build_composite_bases(findings):
         block_index = item.get("block_index", 1)
         block_positions[block_index] = block_positions.get(block_index, 0) + 1
         item["block_position"] = block_positions[block_index]
+    composite_indices = {
+        item.get("finding_key"): item["finding_index"]
+        for item in result
+        if item.get("is_composite_base") and item.get("finding_key")
+    }
+    for item in result:
+        composite_parent = composite_indices.get(item.get("parent_key"))
+        if item.get("parent_finding_index") is None and composite_parent is not None:
+            item["parent_finding_index"] = composite_parent
     return result
 
 
@@ -788,7 +809,7 @@ def calculate_derived_findings(findings):
                     ),
                     parent,
                 )
-            displayed = exact.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+            displayed = display_percent(exact)
             displayed_value = f"{format_decimal(displayed)}%"
             expression = " × ".join(
                 f"{format_decimal(Decimal(item['percent']))}%" for item in chain
@@ -1016,6 +1037,7 @@ def validate_answer(answer, text):
         finding = {
                 "finding_index": position,
                 "finding_key": finding_key,
+                "parent_key": parent_key,
                 "block_index": block_index,
                 "block_position": block_positions[block_index],
                 "block_title": nullable_text(raw.get("block_title"), 300),
