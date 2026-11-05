@@ -51,6 +51,7 @@ services:
   web:
     build: .
     environment:
+      - SERVICE_FQDN_WEB_8000
       - BLOCK=web
       - PORT=8000
       - DATABASE_URL=postgresql://${SERVICE_USER_POSTGRES}:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/desk_research

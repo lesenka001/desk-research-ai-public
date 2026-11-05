@@ -28,6 +28,8 @@ PAGE = """<!doctype html>
   .block span {{ font-size: 13px; color: #6b6b6b; }}
   .arrow {{ font-size: 22px; }}
   .stats {{ display: flex; gap: 24px; flex-wrap: wrap; margin: 8px 0 24px; font-size: 15px; }}
+  .stat-group {{ margin: 0 0 22px; }}
+  .stat-group h2 {{ font-size: 16px; margin: 0 0 8px; }}
   table {{ width: 100%; border-collapse: collapse; background: #fff; font-size: 14px; }}
   th, td {{ text-align: left; padding: 8px 10px; border-bottom: 1px solid #e3e1da; vertical-align: top; }}
   th {{ font-weight: 600; background: #ecebe5; }}
@@ -55,6 +57,25 @@ PAGE = """<!doctype html>
   <div>Последний сбор: <b>{last_run}</b></div>
 </div>
 
+<section class="stat-group">
+  <h2>Роли находок</h2>
+  <div class="stats">
+    <div>Базовые: <b>{base_findings}</b></div>
+    <div>Производные: <b>{derived_findings}</b></div>
+    <div>Условные: <b>{conditional_findings}</b></div>
+  </div>
+</section>
+
+<section class="stat-group">
+  <h2>Статусы материалов</h2>
+  <div class="stats">
+    <div>Новые: <b>{new_materials}</b></div>
+    <div>Готовы: <b>{done_materials}</b></div>
+    <div>Пропущены: <b>{skipped_materials}</b></div>
+    <div>С ошибкой: <b>{failed_materials}</b></div>
+  </div>
+</section>
+
 <table>
 <tr><th>Когда</th><th>Источник</th><th>Тип</th><th>Для IR</th><th>Показатель</th><th>Аудитория и база</th><th>Находка</th></tr>
 {rows}
@@ -78,6 +99,22 @@ def render(conn):
         + CURRENT_AUDIENCE_FINDING_SQL
         + ")"
     ).fetchone()
+    role_counts = dict(
+        conn.execute(
+            "SELECT CASE WHEN f.is_derived THEN 'derived'"
+            " WHEN f.parent_finding_index IS NULL"
+            " AND f.base_kind IN ('targetable_explicit','targetable_inferred') THEN 'base'"
+            " ELSE 'conditional' END AS role, count(*) FROM findings f"
+            " JOIN materials m ON m.id = f.material_id WHERE "
+            + CURRENT_AUDIENCE_FINDING_SQL
+            + " GROUP BY role"
+        ).fetchall()
+    )
+    material_statuses = dict(
+        conn.execute(
+            "SELECT status, count(*) FROM materials GROUP BY status"
+        ).fetchall()
+    )
     last = conn.execute(
         "SELECT status, started_at FROM runs WHERE service = 'collector' ORDER BY id DESC LIMIT 1"
     ).fetchone()
@@ -182,6 +219,13 @@ def render(conn):
         sources=sources,
         materials=materials,
         findings=findings,
+        base_findings=role_counts.get("base", 0),
+        derived_findings=role_counts.get("derived", 0),
+        conditional_findings=role_counts.get("conditional", 0),
+        new_materials=material_statuses.get("new", 0),
+        done_materials=material_statuses.get("done", 0),
+        skipped_materials=material_statuses.get("skipped", 0),
+        failed_materials=material_statuses.get("failed", 0),
         last_run=last_run,
         rows=rows_html,
     )

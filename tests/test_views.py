@@ -96,6 +96,10 @@ class WebConnection:
         self.queries.append((query, params))
         if "count(*) FROM sources" in query:
             return Rows([(4, 8, 2)])
+        if "GROUP BY role" in query:
+            return Rows([("base", 1), ("conditional", 1)])
+        if "FROM materials GROUP BY status" in query:
+            return Rows([("done", 6), ("failed", 2)])
         if "FROM runs WHERE service = 'collector'" in query:
             return Rows([])
         if "SELECT m.published_at" in query:
@@ -151,6 +155,10 @@ class EmptyWebConnection:
         self.queries.append((query, params))
         if "count(*) FROM sources" in query:
             return Rows([(4, 8, 0)])
+        if "GROUP BY role" in query:
+            return Rows([])
+        if "FROM materials GROUP BY status" in query:
+            return Rows([("done", 8)])
         if "FROM runs WHERE service = 'collector'" in query:
             return Rows([])
         if "SELECT m.published_at" in query:
@@ -494,6 +502,13 @@ class ViewTests(unittest.TestCase):
         self.assertIn("22%", page)
         self.assertIn("Исследование кофе", page)
         self.assertIn("Покупали", page)
+        self.assertIn("Роли находок", page)
+        self.assertIn("Базовые: <b>1</b>", page)
+        self.assertIn("Условные: <b>1</b>", page)
+        self.assertIn("С ошибкой: <b>2</b>", page)
+        self.assertNotIn("<form", page.lower())
+        compose = (__import__("pathlib").Path(__file__).parents[1] / "docker-compose.yml").read_text(encoding="utf-8")
+        self.assertIn("SERVICE_FQDN_WEB_8000", compose)
         findings_query = next(
             query for query, _ in conn.queries if "SELECT m.published_at" in query
         )
