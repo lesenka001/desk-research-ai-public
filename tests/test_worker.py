@@ -283,7 +283,7 @@ class TargetingCriteriaTests(unittest.TestCase):
         compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
 
-        self.assertEqual(DEFAULT_PROMPT_VERSION, "audience-composite-bases-v6")
+        self.assertEqual(DEFAULT_PROMPT_VERSION, "audience-composite-bases-v6.1")
         self.assertIn(f"PROMPT_VERSION={DEFAULT_PROMPT_VERSION}", env_example)
         self.assertIn(
             f"PROMPT_VERSION=${{PROMPT_VERSION:-{DEFAULT_PROMPT_VERSION}}}",
@@ -295,7 +295,7 @@ class TargetingCriteriaTests(unittest.TestCase):
         self.assertIn("MAX_OUTPUT_TOKENS=12000", env_example)
         self.assertIn("MAX_OUTPUT_TOKENS=${MAX_OUTPUT_TOKENS:-12000}", compose)
         self.assertIn("REPROCESS_MATERIAL_IDS=3", readme)
-        self.assertIn("prompt_version='audience-composite-bases-v6'", readme)
+        self.assertIn("prompt_version='audience-composite-bases-v6.1'", readme)
         self.assertIn("AS base_count", readme)
         self.assertIn("AS derived_count", readme)
         self.assertIn("AS conditional_count", readme)
