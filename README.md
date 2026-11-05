@@ -145,7 +145,8 @@ Telegram нужен публичный HTTPS-туннель и переменн�
 ## Повторная обработка
 
 Обычный перезапуск worker не обрабатывает материал повторно с той же версией
-промпта. Версия составных баз и производных — `audience-composite-bases-v5`.
+промпта. Версия компактного контракта, составных баз и производных —
+`audience-composite-bases-v6`.
 
 ### Контрольный прогон в Coolify
 
@@ -159,7 +160,7 @@ psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT id, title, processed_promp
 В Environment Variables временно установите:
 
 ```text
-PROMPT_VERSION=audience-composite-bases-v5
+PROMPT_VERSION=audience-composite-bases-v6
 REPROCESS_OLD=1
 REPROCESS_MATERIAL_IDS=3
 MAX_FINDINGS_PER_MATERIAL=20
@@ -170,9 +171,11 @@ MAX_OUTPUT_TOKENS=12000
 результат запросом:
 
 ```sh
-psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT CASE WHEN f.is_derived THEN 'Производная' WHEN f.parent_finding_index IS NULL AND f.base_kind IN ('targetable_explicit','targetable_inferred') THEN 'Базовая' ELSE 'Условная' END AS role, count(*) FROM findings f WHERE f.prompt_version='audience-composite-bases-v5' AND f.material_id=3 GROUP BY role ORDER BY role;"
+psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT count(*) FILTER (WHERE NOT f.is_derived AND f.parent_finding_index IS NULL AND f.base_kind IN ('targetable_explicit','targetable_inferred')) AS base_count, count(*) FILTER (WHERE f.is_derived) AS derived_count, count(*) FILTER (WHERE NOT f.is_derived AND NOT (f.parent_finding_index IS NULL AND f.base_kind IN ('targetable_explicit','targetable_inferred'))) AS conditional_count FROM findings f WHERE f.prompt_version='audience-composite-bases-v6' AND f.material_id=3;"
 
-psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT f.block_index, f.block_position, CASE WHEN f.is_derived THEN 'Производная' WHEN f.parent_finding_index IS NULL AND f.base_kind IN ('targetable_explicit','targetable_inferred') THEN 'Базовая' ELSE 'Условная' END AS role, f.value, f.source_value, f.calculated_percent, f.calculation_formula, f.composite_component_indices FROM findings f WHERE f.prompt_version='audience-composite-bases-v5' AND f.material_id=3 ORDER BY f.block_index, f.block_position;"
+psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT f.block_index, f.block_position, CASE WHEN f.is_derived THEN 'Производная' WHEN f.parent_finding_index IS NULL AND f.base_kind IN ('targetable_explicit','targetable_inferred') THEN 'Базовая' ELSE 'Условная' END AS role, f.value, f.source_value, f.calculated_percent, f.calculation_formula, f.composite_component_indices FROM findings f WHERE f.prompt_version='audience-composite-bases-v6' AND f.material_id=3 ORDER BY f.block_index, f.block_position;"
+
+psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT status, structured_mode, candidate_count, accepted_count, rejected_count, error FROM processing_attempts WHERE material_id=3 AND prompt_version='audience-composite-bases-v6' ORDER BY id DESC LIMIT 1;"
 ```
 
 Ожидаемый результат:
@@ -195,6 +198,9 @@ redeploy:
 REPROCESS_OLD=0
 REPROCESS_MATERIAL_IDS=
 ```
+
+В обычном режиме именно эти два значения должны оставаться такими: worker
+обрабатывает только новые материалы и не запускает старые повторно.
 
 ### Полный архив
 

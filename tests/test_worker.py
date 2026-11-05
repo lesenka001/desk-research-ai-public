@@ -277,23 +277,28 @@ class WorkerValidationTests(unittest.TestCase):
 
 
 class TargetingCriteriaTests(unittest.TestCase):
-    def test_f3_prompt_version_and_control_reprocessing_docs_are_synchronized(self):
+    def test_f4_prompt_version_and_control_reprocessing_docs_are_synchronized(self):
         root = Path(__file__).parents[1]
         env_example = (root / ".env.example").read_text(encoding="utf-8")
         compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
 
-        self.assertEqual(DEFAULT_PROMPT_VERSION, "audience-composite-bases-v5")
+        self.assertEqual(DEFAULT_PROMPT_VERSION, "audience-composite-bases-v6")
         self.assertIn(f"PROMPT_VERSION={DEFAULT_PROMPT_VERSION}", env_example)
         self.assertIn(
             f"PROMPT_VERSION=${{PROMPT_VERSION:-{DEFAULT_PROMPT_VERSION}}}",
             compose,
         )
         self.assertIn("REPROCESS_OLD=0", env_example)
+        self.assertIn("REPROCESS_MATERIAL_IDS=", env_example)
         self.assertIn("REPROCESS_OLD=${REPROCESS_OLD:-0}", compose)
         self.assertIn("MAX_OUTPUT_TOKENS=12000", env_example)
         self.assertIn("MAX_OUTPUT_TOKENS=${MAX_OUTPUT_TOKENS:-12000}", compose)
         self.assertIn("REPROCESS_MATERIAL_IDS=3", readme)
+        self.assertIn("prompt_version='audience-composite-bases-v6'", readme)
+        self.assertIn("AS base_count", readme)
+        self.assertIn("AS derived_count", readme)
+        self.assertIn("AS conditional_count", readme)
         self.assertIn("4 базовые, 10 производных, 0 условных", readme)
         self.assertIn("14% + 36% = 50%", readme)
         self.assertRegex(
