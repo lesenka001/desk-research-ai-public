@@ -5,6 +5,11 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import db
+from bot.main import (
+    CURRENT_AUDIENCE_FINDING_SQL,
+    FINDING_ROLE_LABELS,
+    finding_role,
+)
 
 SERVICE = "web"
 
@@ -59,14 +64,6 @@ PAGE = """<!doctype html>
 ROW = """<tr><td>{date}</td><td>{source}</td><td>{kind}</td><td>{applicability}</td><td>{value}</td>
 <td>{audience}</td><td>{summary}{calculation}</td></tr>"""
 
-TYPE_LABELS = {
-    "population_share": "доля аудитории",
-    "conditional_share": "доля в подгруппе",
-    "absolute_count": "абсолютное число",
-    "market_metric": "рыночный показатель",
-    "other": "другое",
-}
-
 IR_LABELS = {
     "direct": "прямо",
     "indirect": "косвенно",
@@ -76,7 +73,10 @@ IR_LABELS = {
 
 def render(conn):
     sources, materials, findings = conn.execute(
-        "SELECT (SELECT count(*) FROM sources), (SELECT count(*) FROM materials), (SELECT count(*) FROM findings)"
+        "SELECT (SELECT count(*) FROM sources), (SELECT count(*) FROM materials),"
+        " (SELECT count(*) FROM findings f JOIN materials m ON m.id = f.material_id WHERE "
+        + CURRENT_AUDIENCE_FINDING_SQL
+        + ")"
     ).fetchone()
     last = conn.execute(
         "SELECT status, started_at FROM runs WHERE service = 'collector' ORDER BY id DESC LIMIT 1"
@@ -86,14 +86,24 @@ def render(conn):
         """SELECT m.published_at, s.name, m.id, m.title, m.url,
                   f.block_index, f.block_position, f.block_title,
                   f.indicator_type, f.ir_applicability, f.value,
-                  f.audience, f.percent_base, f.summary, f.calculation_formula
+                  f.audience, f.percent_base, f.summary, f.calculation_formula,
+                  f.parent_finding_index, f.base_kind, f.is_derived,
+                  f.calculation_chain, f.finding_index
            FROM findings f
            JOIN materials m ON m.id = f.material_id
            JOIN sources s ON s.id = m.source_id
-           WHERE m.processed_prompt_version IS NULL
-              OR f.prompt_version = m.processed_prompt_version
+           WHERE """
+        + CURRENT_AUDIENCE_FINDING_SQL
+        + """
            ORDER BY m.published_at DESC NULLS LAST, m.id DESC,
-                    f.block_index, f.block_position, f.id LIMIT 100"""
+                    f.block_index,
+                    CASE WHEN f.is_derived THEN 1
+                         WHEN f.parent_finding_index IS NULL
+                          AND f.base_kind IN ('targetable_explicit', 'targetable_inferred') THEN 0
+                         ELSE 2 END,
+                    CASE WHEN f.is_derived AND f.calculation_chain IS NOT NULL
+                         THEN jsonb_array_length(f.calculation_chain) ELSE 0 END,
+                    f.block_position, f.id LIMIT 100"""
     ).fetchall()
     rendered_rows = []
     current_material = None
@@ -114,7 +124,19 @@ def render(conn):
         percent_base,
         summary,
         calculation_formula,
+        parent_finding_index,
+        base_kind,
+        is_derived,
+        calculation_chain,
+        finding_index,
     ) in rows:
+        role = finding_role(
+            {
+                "parent_finding_index": parent_finding_index,
+                "base_kind": base_kind,
+                "is_derived": is_derived,
+            }
+        )
         if material_id != current_material:
             rendered_rows.append(
                 '<tr class="material-row"><td colspan="7">'
@@ -133,7 +155,7 @@ def render(conn):
             ROW.format(
                 date=f"{published:%d.%m %H:%M}" if published else "",
                 source=html.escape(source),
-                kind=f'<span class="tag">{html.escape(TYPE_LABELS.get(indicator_type, indicator_type or "—"))}</span>',
+                kind=f'<span class="tag">{html.escape(FINDING_ROLE_LABELS[role])}</span>',
                 applicability=html.escape(IR_LABELS.get(ir_applicability, ir_applicability or "—")),
                 value=html.escape(value or "—"),
                 audience="<br>".join(

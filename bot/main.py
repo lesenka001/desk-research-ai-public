@@ -40,6 +40,12 @@ CURRENT_AUDIENCE_FINDING_SQL = (
     " ORDER BY latest_f.created_at DESC, latest_f.id DESC LIMIT 1))"
 )
 
+FINDING_ROLE_LABELS = {
+    "base": "Базовая",
+    "derived": "Производная",
+    "conditional": "Условная",
+}
+
 COMMANDS = [
     {"command": "start", "description": "подписаться на новые исследования"},
     {"command": "status", "description": "что было в последних прогонах"},
@@ -117,8 +123,20 @@ def digest_finding_line(finding):
     summary = finding["summary"]
     value = finding.get("value")
     headline = f"{value} — {summary}" if value and value not in summary else summary
-    marker = " ↳" if finding.get("parent_finding_index") is not None else ""
-    return f"•{marker} {html.escape(headline)}"
+    role = finding_role(finding)
+    marker = " ↳" if role == "derived" else ""
+    return f"•{marker} <b>{FINDING_ROLE_LABELS[role]}:</b> {html.escape(headline)}"
+
+
+def digest_finding_sort_key(finding):
+    role = finding_role(finding)
+    chain = finding.get("calculation_chain") or []
+    depth = max(0, len(chain) - 1) if role == "derived" else 0
+    return (
+        {"base": 0, "derived": 1, "conditional": 2}[role],
+        depth,
+        finding.get("block_position") or finding.get("id") or 0,
+    )
 
 
 def build_digest(rows, source_counts=None, limit=TELEGRAM_DIGEST_LIMIT):
@@ -163,7 +181,7 @@ def build_digest(rows, source_counts=None, limit=TELEGRAM_DIGEST_LIMIT):
         for block in material["blocks"].values():
             block_findings = sorted(
                 block["findings"],
-                key=lambda item: (item.get("block_position") or item.get("id") or 0),
+                key=digest_finding_sort_key,
             )
             block_text = (
                 f'\n\n<b>{html.escape(block["title"])}</b>\n'
@@ -241,7 +259,8 @@ def send_new(conn):
     ).fetchall()
     digest_rows = conn.execute(
         "SELECT f.id, m.id, m.title, m.url, s.name, f.block_index, f.block_position,"
-        " f.block_title, f.parent_finding_index, f.summary, f.value, f.is_derived FROM findings f"
+        " f.block_title, f.parent_finding_index, f.summary, f.value, f.is_derived,"
+        " f.base_kind, f.calculation_chain, f.finding_index FROM findings f"
         " JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id"
         " WHERE f.id = ANY(%s) ORDER BY coalesce(m.published_at, m.collected_at) DESC,"
         " m.id DESC, f.block_index, f.block_position, f.id",
@@ -260,6 +279,9 @@ def send_new(conn):
         "summary",
         "value",
         "is_derived",
+        "base_kind",
+        "calculation_chain",
+        "finding_index",
     )
     text, included_ids = build_digest(
         [dict(zip(digest_fields, row)) for row in digest_rows], sources

@@ -74,6 +74,9 @@ class ReprocessedMaterialConnection:
                         "38% респондентов пользовались сервисом.",
                         "38%",
                         False,
+                        "targetable_explicit",
+                        [{"finding_index": 1, "percent": "38"}],
+                        1,
                     )
                 ]
             )
@@ -83,7 +86,11 @@ class ReprocessedMaterialConnection:
 
 
 class WebConnection:
+    def __init__(self):
+        self.queries = []
+
     def execute(self, query, params=None):
+        self.queries.append((query, params))
         if "count(*) FROM sources" in query:
             return Rows([(4, 8, 2)])
         if "FROM runs WHERE service = 'collector'" in query:
@@ -107,9 +114,44 @@ class WebConnection:
                         "покупатели кофе",
                         "22% покупателей выбирают растворимый кофе.",
                         None,
+                        None,
+                        "conditional",
+                        False,
+                        None,
+                        1,
                     )
                 ]
             )
+        raise AssertionError(query)
+
+
+class MarketOnlyConnection:
+    def __init__(self):
+        self.queries = []
+
+    def execute(self, query, params=None):
+        self.queries.append((query, params))
+        if "SELECT EXISTS" in query:
+            return Rows([(False,)])
+        if "SELECT chat_id FROM subscribers" in query:
+            return Rows([(1001,)])
+        if query.startswith("SELECT f.id FROM findings"):
+            return Rows([])
+        raise AssertionError(query)
+
+
+class EmptyWebConnection:
+    def __init__(self):
+        self.queries = []
+
+    def execute(self, query, params=None):
+        self.queries.append((query, params))
+        if "count(*) FROM sources" in query:
+            return Rows([(4, 8, 0)])
+        if "FROM runs WHERE service = 'collector'" in query:
+            return Rows([])
+        if "SELECT m.published_at" in query:
+            return Rows([])
         raise AssertionError(query)
 
 
@@ -169,6 +211,9 @@ class ViewTests(unittest.TestCase):
                 "parent_finding_index": None,
                 "summary": "38% россиян 18+ покупали подержанные товары.",
                 "value": "38%",
+                "base_kind": "targetable_explicit",
+                "is_derived": False,
+                "calculation_chain": [{"finding_index": 1, "percent": "38"}],
             },
             {
                 "id": 2,
@@ -182,6 +227,12 @@ class ViewTests(unittest.TestCase):
                 "parent_finding_index": 1,
                 "summary": "13% россиян 18+ использовали сайты объявлений.",
                 "value": "13%",
+                "base_kind": "conditional",
+                "is_derived": True,
+                "calculation_chain": [
+                    {"finding_index": 1, "percent": "38"},
+                    {"finding_index": 2, "percent": "33"},
+                ],
             },
             {
                 "id": 3,
@@ -195,6 +246,9 @@ class ViewTests(unittest.TestCase):
                 "parent_finding_index": None,
                 "summary": "30% россиян 18+ продавали подержанные товары. " + "очень " * 100,
                 "value": "30%",
+                "base_kind": "targetable_explicit",
+                "is_derived": False,
+                "calculation_chain": [{"finding_index": 3, "percent": "30"}],
             },
         ]
         first_block_only, included = build_digest(rows, [("НАФИ", 3)], limit=450)
@@ -203,6 +257,7 @@ class ViewTests(unittest.TestCase):
         self.assertNotIn("Продавали", first_block_only)
         self.assertEqual(first_block_only.count("https://example.org/study"), 1)
         self.assertIn("Еще 1 находок", first_block_only)
+        self.assertLess(first_block_only.index("Базовая"), first_block_only.index("Производная"))
 
     def test_mini_app_groups_one_material_into_ordered_blocks(self):
         findings = [
@@ -337,13 +392,39 @@ class ViewTests(unittest.TestCase):
         self.assertIn("findingOrder", page)
 
     def test_web_renders_statistical_fields(self):
-        page = render(WebConnection())
+        conn = WebConnection()
+        page = render(conn)
         self.assertIn("Навигатор достижимости ЦА", page)
-        self.assertIn("доля в подгруппе", page)
+        self.assertIn("Условная", page)
         self.assertIn("покупатели кофе", page)
         self.assertIn("22%", page)
         self.assertIn("Исследование кофе", page)
         self.assertIn("Покупали", page)
+        findings_query = next(
+            query for query, _ in conn.queries if "SELECT m.published_at" in query
+        )
+        self.assertIn(CURRENT_AUDIENCE_FINDING_SQL, findings_query)
+        self.assertIn("CASE WHEN f.is_derived THEN 1", findings_query)
+
+    @patch("bot.main.say")
+    def test_market_only_material_is_absent_from_telegram_and_web(self, say_mock):
+        telegram_conn = MarketOnlyConnection()
+        send_new(telegram_conn)
+        say_mock.assert_not_called()
+        selection_query = next(
+            query
+            for query, _ in telegram_conn.queries
+            if query.startswith("SELECT f.id FROM findings")
+        )
+        self.assertIn(CURRENT_AUDIENCE_FINDING_SQL, selection_query)
+
+        web_conn = EmptyWebConnection()
+        page = render(web_conn)
+        self.assertIn("Находок пока нет", page)
+        web_query = next(
+            query for query, _ in web_conn.queries if "SELECT m.published_at" in query
+        )
+        self.assertIn(CURRENT_AUDIENCE_FINDING_SQL, web_query)
 
     def test_telegram_line_contains_audience_and_base(self):
         lines = finding_lines(
