@@ -549,6 +549,19 @@ def derived_summary(finding, root, displayed_value):
     return append_period(summary, period)
 
 
+def classify_finding(finding):
+    """Classify a finding from fields already persisted in the database."""
+    if finding.get("is_derived"):
+        return "derived"
+    if (
+        finding.get("parent_finding_index") is None
+        and finding.get("base_kind")
+        in {"targetable_explicit", "targetable_inferred"}
+    ):
+        return "base"
+    return "conditional"
+
+
 def calculate_derived_findings(findings):
     """Calculate only unambiguous percentage chains rooted in targetable bases."""
     calculated = []
@@ -571,8 +584,6 @@ def calculate_derived_findings(findings):
                 source_percent is not None
                 and finding.get("base_kind")
                 in {"targetable_explicit", "targetable_inferred"}
-                and bool(finding.get("targeting_criteria"))
-                and not finding.get("candidate_criteria")
             )
             if eligible_root:
                 finding["calculated_percent"] = source_percent
@@ -629,6 +640,7 @@ def calculate_derived_findings(findings):
             finding["is_derived"] = True
             root_by_index[finding["finding_index"]] = root
 
+        finding["finding_role"] = classify_finding(finding)
         calculated.append(finding)
         by_index[finding["finding_index"]] = finding
         if finding.get("calculation_chain") and finding["calculation_chain"][0]["finding_index"] == finding["finding_index"]:
@@ -751,6 +763,13 @@ def validate_answer(answer, text):
             )
         ):
             continue
+        # A conditional share is useful on its own only when the article states
+        # the exact human group used as its denominator. Evidence that merely
+        # mentions people elsewhere in the sentence is not enough.
+        if indicator_type == "conditional_share" and not percent_base:
+            continue
+        if indicator_type == "conditional_share":
+            base_kind = "conditional"
         ir_applicability = normalized_ir_applicability(
             raw.get("ir_applicability"), indicator_type, percent_base
         )

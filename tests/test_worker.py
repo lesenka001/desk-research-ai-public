@@ -7,6 +7,7 @@ from unittest.mock import patch
 from worker.main import (
     ModelResponseError,
     calculate_derived_findings,
+    classify_finding,
     load_targeting_criteria,
     model_request_body,
     parse_material_ids,
@@ -71,7 +72,7 @@ class WorkerValidationTests(unittest.TestCase):
         self.assertEqual(rows[0]["indicator_type"], "conditional_share")
         self.assertEqual(rows[0]["ir_applicability"], "direct")
 
-    def test_unverifiable_percent_base_is_cleared_and_direct_is_downgraded(self):
+    def test_conditional_share_without_verifiable_base_is_rejected(self):
         answer = {
             "relevant": True,
             "findings": [
@@ -86,9 +87,33 @@ class WorkerValidationTests(unittest.TestCase):
                 }
             ],
         }
-        rows = validate_answer(answer, TEXT)
-        self.assertIsNone(rows[0]["percent_base"])
-        self.assertEqual(rows[0]["ir_applicability"], "indirect")
+        self.assertEqual(validate_answer(answer, TEXT), [])
+
+    def test_standalone_share_with_known_human_base_stays_conditional(self):
+        answer = {
+            "relevant": True,
+            "findings": [
+                {
+                    "finding_key": "coffee",
+                    "block_index": 1,
+                    "parent_key": None,
+                    "indicator_type": "conditional_share",
+                    "ir_applicability": "direct",
+                    "audience": "покупатели кофе",
+                    "value": "22%",
+                    "percent_base": "Среди покупателей кофе",
+                    "base_kind": "unknown",
+                    "evidence": "Среди покупателей кофе 22% выбирают растворимый кофе ежедневно.",
+                    "summary": "22% покупателей кофе выбирают растворимый кофе ежедневно.",
+                }
+            ],
+        }
+        rows = calculate_derived_findings(validate_answer(answer, TEXT))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["finding_role"], "conditional")
+        self.assertEqual(rows[0]["base_kind"], "conditional")
+        self.assertEqual(rows[0]["value"], "22%")
+        self.assertIsNone(rows[0]["calculation_formula"])
 
     def test_market_metric_is_rejected(self):
         answer = {
@@ -539,6 +564,10 @@ class DerivedCalculationTests(unittest.TestCase):
             [Decimal("12.54"), Decimal("13.3"), Decimal("7.98")],
         )
         self.assertEqual([row["value"] for row in rows], ["38%", "13%", "13%", "8%"])
+        self.assertEqual(
+            [row["finding_role"] for row in rows],
+            ["base", "derived", "derived", "derived"],
+        )
         self.assertEqual(rows[1]["calculation_formula"], "38% × 33% = 12,54%")
         self.assertIn("населения России в возрасте 18+", rows[1]["summary"])
         self.assertIn("за последние 6 месяцев", rows[1]["summary"])
@@ -557,14 +586,58 @@ class DerivedCalculationTests(unittest.TestCase):
         self.assertEqual(rows[2]["calculation_formula"], "40% × 50% × 25% = 5%")
         self.assertEqual(len(rows[2]["calculation_chain"]), 3)
 
-    def test_candidate_root_and_ambiguous_child_are_not_calculated(self):
+    def test_candidate_criteria_do_not_block_base_but_unlinked_share_is_conditional(self):
         candidate_root = self.finding(1, "38%", candidate_criteria=["income"])
-        ambiguous_child = self.finding(2, "33%", None, "использовали сайты объявлений")
+        ambiguous_child = self.finding(
+            2,
+            "33%",
+            None,
+            "использовали сайты объявлений",
+            indicator_type="conditional_share",
+            base_kind="conditional",
+            audience="покупателей",
+            percent_base="покупателей",
+            targeting_criteria=[],
+        )
         rows = calculate_derived_findings([candidate_root, ambiguous_child])
-        self.assertIsNone(rows[0]["calculated_percent"])
+        self.assertEqual(rows[0]["calculated_percent"], Decimal("38"))
         self.assertFalse(rows[0]["is_derived"])
+        self.assertEqual(rows[0]["finding_role"], "base")
         self.assertEqual(rows[1]["value"], "33%")
         self.assertIsNone(rows[1]["calculation_formula"])
+        self.assertEqual(rows[1]["finding_role"], "conditional")
+
+    def test_classification_uses_fields_persisted_in_database(self):
+        self.assertEqual(
+            classify_finding(
+                {
+                    "is_derived": False,
+                    "parent_finding_index": None,
+                    "base_kind": "targetable_explicit",
+                }
+            ),
+            "base",
+        )
+        self.assertEqual(
+            classify_finding(
+                {
+                    "is_derived": True,
+                    "parent_finding_index": 1,
+                    "base_kind": "conditional",
+                }
+            ),
+            "derived",
+        )
+        self.assertEqual(
+            classify_finding(
+                {
+                    "is_derived": False,
+                    "parent_finding_index": None,
+                    "base_kind": "conditional",
+                }
+            ),
+            "conditional",
+        )
 
     def test_non_percentage_value_is_not_multiplied(self):
         rows = calculate_derived_findings(
