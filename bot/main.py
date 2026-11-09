@@ -41,12 +41,6 @@ CURRENT_AUDIENCE_FINDING_SQL = (
     " ORDER BY latest_f.created_at DESC, latest_f.id DESC LIMIT 1))"
 )
 
-FINDING_ROLE_LABELS = {
-    "base": "Базовая",
-    "derived": "Производная",
-    "conditional": "Условная",
-}
-
 COMMANDS = [
     {"command": "start", "description": "подписаться на новые исследования"},
     {"command": "status", "description": "что было в последних прогонах"},
@@ -124,19 +118,13 @@ def digest_finding_line(finding):
     summary = finding["summary"]
     value = finding.get("value")
     headline = f"{value} — {summary}" if value and value not in summary else summary
-    role = finding_role(finding)
-    marker = " ↳" if role == "derived" else ""
-    return f"•{marker} <b>{FINDING_ROLE_LABELS[role]}:</b> {html.escape(headline)}"
+    return f"• {html.escape(headline)}"
 
 
 def digest_finding_sort_key(finding):
-    role = finding_role(finding)
-    chain = finding.get("calculation_chain") or []
-    depth = max(0, len(chain) - 1) if role == "derived" else 0
     return (
-        {"base": 0, "derived": 1, "conditional": 2}[role],
-        depth,
         finding.get("block_position") or finding.get("id") or 0,
+        finding.get("id") or 0,
     )
 
 
@@ -412,21 +400,8 @@ def iso(moment):
     )
 
 
-def finding_role(finding):
-    """Return the UI role from fields persisted by the worker."""
-    if finding.get("is_derived"):
-        return "derived"
-    if (
-        finding.get("parent_finding_index") is None
-        and finding.get("base_kind")
-        in {"targetable_explicit", "targetable_inferred"}
-    ):
-        return "base"
-    return "conditional"
-
-
 def group_findings(findings):
-    """Group a flat feed by source page and then by calculation block."""
+    """Group a flat feed by source page and source order."""
     materials = {}
     for finding in sorted(
         findings,
@@ -436,7 +411,6 @@ def group_findings(findings):
             item.get("block_position") or item.get("id") or 0,
         ),
     ):
-        finding["finding_role"] = finding_role(finding)
         material_id = finding.get("material_id")
         material = materials.setdefault(
             material_id,
@@ -486,7 +460,6 @@ def page_data(conn):
         "geography",
         "study_period",
         "behavior_period",
-        "behavior_period_origin",
         "useful_for",
         "evidence",
         "source_value",
@@ -498,8 +471,6 @@ def page_data(conn):
         "base_reason",
         "methodology_evidence",
         "is_derived",
-        "is_composite_base",
-        "composite_component_indices",
         "targeting_criteria",
         "candidate_criteria",
         "title",
@@ -517,11 +488,9 @@ def page_data(conn):
     for row in conn.execute(
         "SELECT f.id, m.id, f.finding_index, f.summary, f.topic, f.value, f.block_index, f.block_position,"
         " f.block_title, f.parent_finding_index, f.indicator_type, f.ir_applicability, f.audience,"
-        " f.percent_base, f.geography, f.study_period, f.behavior_period,"
-        " f.behavior_period_origin, f.useful_for, f.evidence,"
+        " f.percent_base, f.geography, f.study_period, f.behavior_period, f.useful_for, f.evidence,"
         " f.source_value, f.source_percent_base, f.calculated_percent, f.calculation_formula,"
         " f.calculation_chain, f.base_kind, f.base_reason, f.methodology_evidence, f.is_derived,"
-        " f.is_composite_base, f.composite_component_indices,"
         " f.targeting_criteria, f.candidate_criteria,"
         " m.title, m.url, coalesce(m.published_at, m.collected_at), m.run_id,"
         " s.id, s.name, s.url, left(m.text, 600), f.sent_at, f.model"
@@ -537,7 +506,6 @@ def page_data(conn):
         )
         if finding["calculated_percent"] is not None:
             finding["calculated_percent"] = str(finding["calculated_percent"])
-        finding["finding_role"] = finding_role(finding)
         findings.append(finding)
 
     run = conn.execute(

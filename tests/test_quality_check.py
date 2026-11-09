@@ -14,7 +14,7 @@ from worker.main import (
 
 
 class QualityReportTests(unittest.TestCase):
-    def test_quality_report_contains_deterministic_derived_share(self):
+    def test_quality_report_keeps_source_percentages_without_calculation(self):
         text = (
             "Опрос проведен среди жителей России 18+. "
             "40% жителей России 18+ покупали подержанные товары за 6 месяцев. "
@@ -84,10 +84,10 @@ class QualityReportTests(unittest.TestCase):
                 Path("unused.json"),
                 model_call=lambda *args: answer,
             )
-        derived = report[0]["accepted_findings"][1]
-        self.assertEqual(derived["value"], "10%")
-        self.assertEqual(derived["calculation_formula"], "40% × 25% = 10%")
-        self.assertEqual(derived["calculated_percent"], "10")
+        accepted = report[0]["accepted_findings"]
+        self.assertEqual([finding["value"] for finding in accepted], ["40%", "25%"])
+        self.assertTrue(all(finding["calculation_formula"] is None for finding in accepted))
+        self.assertTrue(all(finding["calculated_percent"] is None for finding in accepted))
 
     def test_report_is_written_as_utf8_without_terminal_transcoding(self):
         path = Path("report.json")

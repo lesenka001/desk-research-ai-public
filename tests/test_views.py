@@ -15,7 +15,7 @@ from bot.main import (
     render_page,
     send_new,
 )
-from web.main import render, render_material
+from web.main import render
 
 
 class Rows:
@@ -96,14 +96,6 @@ class WebConnection:
         self.queries.append((query, params))
         if "count(*) FROM sources" in query:
             return Rows([(4, 8, 2)])
-        if "GROUP BY role" in query:
-            return Rows([("base", 1), ("conditional", 1)])
-        if "FROM materials GROUP BY status" in query:
-            return Rows([("done", 6), ("failed", 2)])
-        if "FROM processing_attempts GROUP BY status" in query:
-            return Rows([("success", 4), ("model_error", 1)])
-        if "FROM finding_candidates" in query:
-            return Rows([(7, 3)])
         if "FROM runs WHERE service = 'collector'" in query:
             return Rows([])
         if "SELECT m.published_at" in query:
@@ -124,20 +116,8 @@ class WebConnection:
                         "покупатели кофе",
                         "покупатели кофе",
                         "22% покупателей выбирают растворимый кофе.",
-                        None,
-                        None,
-                        "conditional",
-                        False,
-                        None,
-                        1,
                     )
                 ]
-            )
-        if "LEFT JOIN LATERAL" in query:
-            return Rows(
-                [(10, "ФОМ", "Исследование кофе", "https://example.org/study",
-                  datetime(2026, 11, 2, tzinfo=timezone.utc), "done", "v5", None,
-                  2, 1, 1, 1)]
             )
         raise AssertionError(query)
 
@@ -165,42 +145,10 @@ class EmptyWebConnection:
         self.queries.append((query, params))
         if "count(*) FROM sources" in query:
             return Rows([(4, 8, 0)])
-        if "GROUP BY role" in query:
-            return Rows([])
-        if "FROM materials GROUP BY status" in query:
-            return Rows([("done", 8)])
-        if "FROM processing_attempts GROUP BY status" in query:
-            return Rows([])
-        if "FROM finding_candidates" in query:
-            return Rows([(0, 0)])
         if "FROM runs WHERE service = 'collector'" in query:
             return Rows([])
         if "SELECT m.published_at" in query:
             return Rows([])
-        if "LEFT JOIN LATERAL" in query:
-            return Rows([])
-        raise AssertionError(query)
-
-
-class MaterialDetailConnection:
-    def execute(self, query, params=None):
-        if "FROM materials m JOIN sources" in query:
-            return Rows([(3, "ФОМ", "Материал <script>alert(1)</script>",
-                          "https://example.org/study", "done", "v6",
-                          "Текст <img src=x onerror=alert(1)>")])
-        if "FROM processing_attempts WHERE" in query:
-            return Rows([(9, datetime(2026, 11, 5, tzinfo=timezone.utc), "v6", "model",
-                          "json_object", "success", "stop", 2, 1, 1, None,
-                          {"findings": ["<script>raw</script>"]})])
-        if "FROM finding_candidates fc" in query:
-            return Rows([
-                (1, True, None, None, 1, {"summary": "принят"}),
-                (2, False, "missing_summary", "Нет подписи <b>x</b>", None,
-                 {"value": "22%", "html": "<script>x</script>"}),
-            ])
-        if "FROM findings WHERE" in query:
-            return Rows([(1, 1, "Покупка", "50%", "50%", "50% взрослых покупали",
-                          None, False, None, "50% опрошенных", "репрезентативно")])
         raise AssertionError(query)
 
 
@@ -327,7 +275,12 @@ class ViewTests(unittest.TestCase):
         self.assertNotIn("Продавали", first_block_only)
         self.assertEqual(first_block_only.count("https://example.org/study"), 1)
         self.assertIn("Еще 1 находок", first_block_only)
-        self.assertLess(first_block_only.index("Базовая"), first_block_only.index("Производная"))
+        self.assertLess(
+            first_block_only.index("38% россиян"),
+            first_block_only.index("13% россиян"),
+        )
+        self.assertNotIn("Базовая", first_block_only)
+        self.assertNotIn("Производная", first_block_only)
 
     def test_mini_app_groups_one_material_into_ordered_blocks(self):
         findings = [
@@ -384,92 +337,24 @@ class ViewTests(unittest.TestCase):
             [item["value"] for item in groups[0]["blocks"][0]["findings"]],
             ["38%", "13%"],
         )
-        self.assertEqual(
-            [item["finding_role"] for item in groups[0]["blocks"][0]["findings"]],
-            ["base", "derived"],
+        self.assertTrue(
+            all(
+                "finding_role" not in item
+                for item in groups[0]["blocks"][0]["findings"]
+            )
         )
 
-    def test_control_article_shows_four_bases_ten_derivatives_and_no_duplicates(self):
-        rows = []
-
-        def add(value, role, block, position, summary):
-            finding_id = len(rows) + 1
-            rows.append(
-                {
-                    "id": finding_id,
-                    "material_id": 3,
-                    "finding_index": finding_id,
-                    "title": "Продажа и покупка подержанных товаров",
-                    "url": "https://example.org/second-hand",
-                    "source": "ФОМ",
-                    "block_index": block,
-                    "block_position": position,
-                    "block_title": "Покупка" if block == 1 else "Продажа",
-                    "parent_finding_index": None if role == "base" else 3,
-                    "summary": summary,
-                    "value": value,
-                    "base_kind": "targetable_inferred" if role == "base" else "conditional",
-                    "is_derived": role == "derived",
-                    "calculation_chain": (
-                        [{"finding_index": 3, "percent": "50"}, {"finding_index": finding_id, "percent": "1"}]
-                        if role == "derived"
-                        else [{"finding_index": finding_id, "percent": value.rstrip("%") }]
-                    ),
-                }
-            )
-
-        add("14%", "base", 1, 1, "Обычная практика покупки")
-        add("36%", "base", 1, 2, "Покупали несколько раз")
-        add("50%", "base", 1, 3, "Когда-либо приобретали подержанные товары")
-        for position, value, summary in (
-            (4, "10,5%", "Приобретали автомобили"),
-            (5, "7%", "Приобретали бытовую технику"),
-            (6, "7%", "Приобретали электронику"),
-            (7, "17,5%", "Покупали с целью экономии"),
-            (8, "16,5%", "Покупали через сайты объявлений"),
-        ):
-            add(value, "derived", 1, position, summary)
-        add("38%", "base", 2, 1, "Когда-либо продавали подержанные товары")
-        for position, value, summary in (
-            (2, "6%", "Продавали автомобили"),
-            (3, "4%", "Продавали бытовую технику"),
-            (4, "4%", "Продавали электронику"),
-            (5, "12%", "Продавали через сайты объявлений"),
-            (6, "9%", "Продавали с целью освободить место"),
-        ):
-            add(value, "derived", 2, position, summary)
-
-        groups = group_findings([dict(row) for row in rows])
-        roles = [
-            finding["finding_role"]
-            for block in groups[0]["blocks"]
-            for finding in block["findings"]
-        ]
-        digest, included = build_digest(rows, [("ФОМ", 14)], limit=10000)
-
-        self.assertEqual(roles.count("base"), 4)
-        self.assertEqual(roles.count("derived"), 10)
-        self.assertNotIn("conditional", roles)
-        self.assertEqual(len(included), 14)
-        self.assertEqual(digest.count("<b>Базовая:</b>"), 4)
-        self.assertEqual(digest.count("<b>Производная:</b>"), 10)
-        self.assertNotIn("Условная", digest)
-        for raw_duplicate in ("21%", "35%", "33%", "15%", "11%", "31%", "23%"):
-            self.assertNotIn(raw_duplicate, digest)
-
-    def test_mini_app_template_contains_calculation_audit(self):
+    def test_mini_app_template_contains_grouped_source_findings(self):
         template = (
             __import__("pathlib").Path(__file__).parents[1] / "bot" / "template.html"
         ).read_text(encoding="utf-8")
-        self.assertIn("Расчёт от базовой доли", template)
-        self.assertIn("Расчёт составной базы", template)
-        self.assertIn("composite_component_indices", template)
-        self.assertIn("calculation_formula", template)
+        self.assertNotIn("Расчёт от базовой доли", template)
+        self.assertNotIn("calculation_formula", template)
         self.assertIn("candidate_criteria", template)
         self.assertIn("finding-block", template)
 
     @patch("bot.main.page_data")
-    def test_mini_app_html_has_roles_calculated_value_and_source_details(
+    def test_mini_app_html_has_source_values_without_roles_or_calculations(
         self, page_data_mock
     ):
         findings = [
@@ -477,7 +362,6 @@ class ViewTests(unittest.TestCase):
                 "id": 1,
                 "material_id": 10,
                 "finding_index": 1,
-                "finding_role": "base",
                 "value": "38%",
                 "summary": "38% россиян покупали подержанные товары.",
             },
@@ -485,18 +369,13 @@ class ViewTests(unittest.TestCase):
                 "id": 2,
                 "material_id": 10,
                 "finding_index": 2,
-                "finding_role": "derived",
-                "value": "13%",
-                "source_value": "33%",
-                "calculated_percent": "12.540000",
-                "calculation_formula": "38% × 33% = 12,54%",
-                "summary": "13% россиян покупали товары через сайты объявлений.",
+                "value": "33%",
+                "summary": "33% покупателей использовали сайты объявлений.",
             },
             {
                 "id": 3,
                 "material_id": 10,
                 "finding_index": 3,
-                "finding_role": "conditional",
                 "value": "22%",
                 "summary": "22% покупателей выбирают растворимый кофе.",
             },
@@ -515,60 +394,29 @@ class ViewTests(unittest.TestCase):
         payload_end = page.index(";", payload_start)
         payload = json.loads(page[payload_start:payload_end])
 
-        self.assertEqual(
-            [finding["finding_role"] for finding in payload["findings"]],
-            ["base", "derived", "conditional"],
-        )
-        self.assertEqual(payload["findings"][1]["value"], "13%")
-        self.assertEqual(payload["findings"][1]["source_value"], "33%")
-        self.assertEqual(
-            payload["findings"][1]["calculation_formula"],
-            "38% × 33% = 12,54%",
-        )
+        self.assertEqual([item["value"] for item in payload["findings"]], ["38%", "33%", "22%"])
+        self.assertTrue(all("finding_role" not in item for item in payload["findings"]))
+        self.assertTrue(all("calculation_formula" not in item for item in payload["findings"]))
         for label in ("Базовая", "Производная", "Условная"):
-            self.assertIn(label, page)
+            self.assertNotIn(label, page)
         self.assertIn('class="finding-value"', page)
-        self.assertIn("Исходная условная доля", page)
+        self.assertNotIn("Исходная условная доля", page)
         self.assertIn("findingOrder", page)
 
     def test_web_renders_statistical_fields(self):
         conn = WebConnection()
         page = render(conn)
         self.assertIn("Навигатор достижимости ЦА", page)
-        self.assertIn("Условная", page)
+        self.assertNotIn("Условная", page)
         self.assertIn("покупатели кофе", page)
         self.assertIn("22%", page)
         self.assertIn("Исследование кофе", page)
         self.assertIn("Покупали", page)
-        self.assertIn("Роли находок", page)
-        self.assertIn("Базовые: <b>1</b>", page)
-        self.assertIn("Условные: <b>1</b>", page)
-        self.assertIn("С ошибкой: <b>2</b>", page)
-        self.assertIn("Успешные: <b>4</b>", page)
-        self.assertIn("Принято кандидатов: <b>7</b>", page)
-        self.assertIn('href="/materials/10"', page)
-        self.assertNotIn("<form", page.lower())
-        compose = (__import__("pathlib").Path(__file__).parents[1] / "docker-compose.yml").read_text(encoding="utf-8")
-        self.assertIn("SERVICE_FQDN_WEB_8000", compose)
         findings_query = next(
             query for query, _ in conn.queries if "SELECT m.published_at" in query
         )
         self.assertIn(CURRENT_AUDIENCE_FINDING_SQL, findings_query)
-        self.assertIn("CASE WHEN f.is_derived THEN 1", findings_query)
-
-    def test_public_material_diagnostics_are_escaped_and_read_only(self):
-        page = render_material(MaterialDetailConnection(), 3)
-
-        self.assertIn("missing_summary", page)
-        self.assertIn("отклонён", page)
-        self.assertIn("принят", page)
-        self.assertIn("50% взрослых покупали", page)
-        self.assertIn("репрезентативно", page)
-        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
-        self.assertIn("&lt;img src=x onerror=alert(1)&gt;", page)
-        self.assertNotIn("<script>", page.lower())
-        self.assertNotIn("<form", page.lower())
-        self.assertNotIn("<button", page.lower())
+        self.assertNotIn("CASE WHEN f.is_derived THEN 1", findings_query)
 
     @patch("bot.main.say")
     def test_market_only_material_is_absent_from_telegram_and_web(self, say_mock):

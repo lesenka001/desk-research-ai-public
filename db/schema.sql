@@ -94,23 +94,6 @@ ALTER TABLE findings ADD COLUMN IF NOT EXISTS base_kind TEXT;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS base_reason TEXT;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS methodology_evidence TEXT;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS behavior_period TEXT;
-ALTER TABLE findings ADD COLUMN IF NOT EXISTS behavior_period_origin TEXT;
-ALTER TABLE findings ADD COLUMN IF NOT EXISTS behavior_period_evidence TEXT;
-ALTER TABLE findings ADD COLUMN IF NOT EXISTS scale_key TEXT;
-ALTER TABLE findings ADD COLUMN IF NOT EXISTS scale_category TEXT;
-ALTER TABLE findings ADD COLUMN IF NOT EXISTS scale_choice_mode TEXT;
-ALTER TABLE findings ADD COLUMN IF NOT EXISTS scale_evidence TEXT;
-ALTER TABLE findings ADD COLUMN IF NOT EXISTS composite_base_key TEXT;
-ALTER TABLE findings ADD COLUMN IF NOT EXISTS composite_base_label TEXT;
-ALTER TABLE findings ADD COLUMN IF NOT EXISTS composite_base_behavior_period TEXT;
-ALTER TABLE findings ADD COLUMN IF NOT EXISTS include_in_composite_base BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE findings ADD COLUMN IF NOT EXISTS is_composite_base BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE findings ADD COLUMN IF NOT EXISTS composite_component_indices JSONB;
-ALTER TABLE findings ADD COLUMN IF NOT EXISTS question_audience TEXT;
-ALTER TABLE findings ADD COLUMN IF NOT EXISTS question_audience_evidence TEXT;
-ALTER TABLE findings ADD COLUMN IF NOT EXISTS general_population TEXT;
-ALTER TABLE findings ADD COLUMN IF NOT EXISTS general_population_reason TEXT;
-ALTER TABLE findings ADD COLUMN IF NOT EXISTS general_population_evidence TEXT;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS is_derived BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS targeting_criteria JSONB;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS candidate_criteria JSONB;
@@ -130,40 +113,6 @@ CREATE TABLE IF NOT EXISTS subscribers (
     name        TEXT,
     started_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
-CREATE TABLE IF NOT EXISTS processing_attempts (
-    id              BIGSERIAL PRIMARY KEY,
-    material_id     INTEGER NOT NULL REFERENCES materials(id),
-    prompt_version  TEXT NOT NULL,
-    model           TEXT NOT NULL,
-    structured_mode TEXT,
-    status          TEXT NOT NULL,
-    finish_reason   TEXT,
-    raw_response    JSONB,
-    error           TEXT,
-    candidate_count INTEGER NOT NULL DEFAULT 0,
-    accepted_count  INTEGER NOT NULL DEFAULT 0,
-    rejected_count  INTEGER NOT NULL DEFAULT 0,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS finding_candidates (
-    id               BIGSERIAL PRIMARY KEY,
-    attempt_id       BIGINT NOT NULL REFERENCES processing_attempts(id),
-    candidate_index  INTEGER NOT NULL,
-    raw_candidate    JSONB,
-    accepted         BOOLEAN NOT NULL DEFAULT FALSE,
-    rejection_code   TEXT,
-    rejection_reason TEXT,
-    finding_index    INTEGER,
-    finding_id       INTEGER REFERENCES findings(id),
-    UNIQUE (attempt_id, candidate_index)
-);
-
-CREATE INDEX IF NOT EXISTS processing_attempts_material_created_idx
-    ON processing_attempts (material_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS finding_candidates_attempt_idx
-    ON finding_candidates (attempt_id, candidate_index);
 
 -- Preserve workshop data, but stop collecting the old AI-news sources.
 UPDATE sources SET active = FALSE

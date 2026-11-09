@@ -172,25 +172,8 @@ const plural = (n, one, few, many) => {
 };
 const day = (iso) => new Date(iso).toLocaleDateString("ru-RU", { day: "numeric", month: "short" });
 const tags = (f) => (f.reason || "").split(/,\s*/).map((t) => t.trim()).filter((t) => t && t.length <= 24).slice(0, 3);
-const roleLabels = { base: "Базовая", derived: "Производная", conditional: "Условная" };
-const findingRole = (f) => f.finding_role || (f.is_derived ? "derived" :
-  (f.parent_finding_index == null && ["targetable_explicit", "targetable_inferred"].includes(f.base_kind) ? "base" : "conditional"));
-const findingDepth = (f, block) => {
-  let depth = 0, current = f;
-  const seen = new Set();
-  while (current && current.parent_finding_index != null && !seen.has(current.finding_index)) {
-    seen.add(current.finding_index);
-    current = block.find((item) => item.finding_index === current.parent_finding_index);
-    if (current) depth += 1;
-  }
-  return depth;
-};
-const findingOrder = (a, b, block) => {
-  const rank = { base: 0, derived: 1, conditional: 2 };
-  return (rank[findingRole(a)] - rank[findingRole(b)]) ||
-    (findingDepth(a, block) - findingDepth(b, block)) ||
-    ((a.block_position || a.id || 0) - (b.block_position || b.id || 0));
-};
+const findingOrder = (a, b) =>
+  (a.block_position || a.id || 0) - (b.block_position || b.id || 0);
 const summaryWithoutValue = (f) => {
   const summary = String(f.summary || "").trim();
   const value = String(f.value || "").trim();
@@ -270,9 +253,9 @@ function renderFeed() {
           <ul class="block-findings">${block.findings
             .sort((a, b) => findingOrder(a, b, block.findings))
             .map((f) => {
-              const role = findingRole(f), summary = summaryWithoutValue(f);
-              return `<li><button class="item role-${role}" data-open="${f.id}">
-                <span class="line1"><span class="finding-type finding-type--${role}">${roleLabels[role]}</span>${tags(f).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</span>
+              const summary = summaryWithoutValue(f);
+              return `<li><button class="item" data-open="${f.id}">
+                <span class="line1">${tags(f).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</span>
                 <p>${f.value ? `<strong class="finding-value">${esc(f.value)}</strong>${summary ? " · " : ""}` : ""}${esc(summary)}</p>
               </button></li>`;
             }).join("")}</ul>
@@ -286,11 +269,7 @@ function renderDetail(f) {
   const at = list.findIndex((x) => x.id === f.id);
   const same = f.summary.trim() === f.title.trim();
   const text = f.text ? esc(f.text) + (f.text.length >= 600 ? "…" : "") : "";
-  const role = findingRole(f), summary = summaryWithoutValue(f);
-  const traceIndices = f.is_composite_base
-    ? (f.composite_component_indices || [])
-    : (f.calculation_chain || []).map((step) => step.finding_index);
-  const chain = traceIndices.map((findingIndex) => findings.find((item) => item.material_id === f.material_id && item.id !== null && item.finding_index === findingIndex)).filter((item) => item && item.id !== f.id);
+  const summary = summaryWithoutValue(f);
   return `<article class="detail">
     <div class="bar">
       ${inTelegram ? `<span class="label">${esc(f.source)}</span>` : `<button class="back" data-back>← Лента</button>`}
@@ -301,7 +280,7 @@ function renderDetail(f) {
       </div>
     </div>
     <span class="label">${esc(f.source)} · ${day(f.date)}${f.run_id === lastRun ? " · новое" : ""}</span>
-    <div class="detail-kind"><span class="finding-type finding-type--${role}">${roleLabels[role]}</span>${f.value ? `<strong class="detail-value">${esc(f.value)}</strong>` : ""}</div>
+    <div class="detail-kind">${f.value ? `<strong class="detail-value">${esc(f.value)}</strong>` : ""}</div>
     <h2>${esc(summary)}</h2>
     ${same ? "" : `<p class="orig">${esc(f.title)}</p>`}
     <div class="rec">
@@ -316,19 +295,7 @@ function renderDetail(f) {
       ${f.useful_for ? `<p>${esc(f.useful_for)}</p>` : ""}
       ${f.evidence ? `<p class="excerpt">Подтверждение: «${esc(f.evidence)}»</p>` : ""}
     </div>
-    ${f.is_derived || f.is_composite_base ? `<section class="trace">
-      <span class="label">${f.is_composite_base ? "Расчёт составной базы" : "Расчёт от базовой доли"}</span>
-      <h3>${esc(f.calculation_formula || "")}</h3>
-      <div class="rec">
-        ${f.is_derived ? `<p class="key">Исходная условная доля: ${esc(f.source_value || "—")}</p>` : ""}
-        ${f.is_derived && f.source_percent_base ? `<p class="key">Исходная база: ${esc(f.source_percent_base)}</p>` : ""}
-        ${f.calculated_percent ? `<p class="key">Точный результат: ${esc(exactPercent(f.calculated_percent))}%</p>` : ""}
-      </div>
-      ${chain.map((item) => `<div class="rec"><span class="label">Шаг ${item.block_position}</span><p>${esc(item.source_value || item.value || "—")} · ${esc(item.summary)}</p>${item.evidence ? `<p class="excerpt">«${esc(item.evidence)}»</p>` : ""}</div>`).join("")}
-      ${f.base_reason ? `<p class="say">Допущение о базе: ${esc(f.base_reason)}</p>` : ""}
-      ${f.methodology_evidence ? `<p class="excerpt">Методология: «${esc(f.methodology_evidence)}»</p>` : ""}
-    </section>` : ""}
-    ${(f.candidate_criteria || []).length ? `<div class="rec"><span class="label">Кандидат в таргетируемые критерии</span><p>${f.candidate_criteria.map(esc).join(", ")}</p><p class="key">Не используется в автоматическом пересчёте до подтверждения.</p></div>` : ""}
+    ${(f.candidate_criteria || []).length ? `<div class="rec"><span class="label">Кандидат в таргетируемые критерии</span><p>${f.candidate_criteria.map(esc).join(", ")}</p><p class="key">Не входит в утверждённый список до подтверждения.</p></div>` : ""}
     ${text ? `<p class="excerpt">${text}</p>` : ""}
     ${tags(f).length ? `<div class="tags">${tags(f).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div>` : ""}
     ${inTelegram ? "" : `<button class="btn main" data-url="${esc(f.url)}">Открыть материал</button>`}

@@ -6,7 +6,7 @@ import re
 import time
 import urllib.error
 import urllib.request
-from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import db
@@ -14,12 +14,12 @@ import db
 SERVICE = "worker"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = os.environ.get("MODEL", "anthropic/claude-haiku-5.5")
-DEFAULT_PROMPT_VERSION = "audience-composite-bases-v6.1"
+DEFAULT_PROMPT_VERSION = "audience-human-shares-v4"
 PROMPT_VERSION = os.environ.get("PROMPT_VERSION", DEFAULT_PROMPT_VERSION)
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "10"))
 RETRY_SECONDS = int(os.environ.get("RETRY_SECONDS", "3600"))
 MAX_TEXT_CHARS = int(os.environ.get("MAX_TEXT_CHARS", "12000"))
-MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "12000"))
+MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "6000"))
 WORKER_BATCH_SIZE = int(os.environ.get("WORKER_BATCH_SIZE", "20"))
 MAX_FINDINGS_PER_MATERIAL = int(os.environ.get("MAX_FINDINGS_PER_MATERIAL", "20"))
 REPROCESS_OLD = os.environ.get("REPROCESS_OLD", "0").lower() in {"1", "true", "yes"}
@@ -187,21 +187,6 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
       "percent_base": "дословная короткая формулировка знаменателя/базы процента из текста или null",
       "study_period": "период проведения исследования или null",
       "behavior_period": "период, срок или частота поведения, покупки или пользования или null",
-      "behavior_period_origin": "explicit | inherited | not_stated",
-      "behavior_period_evidence": "дословная цитата с собственным периодом/частотой показателя или null",
-      "scale_key": "общий ключ шкалы для взаимоисключающих категорий или null",
-      "scale_category": "название категории этой шкалы или null",
-      "scale_choice_mode": "single_choice | multiple_choice | unknown | not_applicable",
-      "scale_evidence": "дословная цитата, подтверждающая устройство шкалы/тип выбора, или null",
-      "composite_base_key": "общий ключ новой базы из выбранных категорий шкалы или null",
-      "composite_base_label": "текст находки после процента для новой базы или null",
-      "composite_base_behavior_period": "период/частота новой составной базы или null",
-      "include_in_composite_base": true или false,
-      "question_audience": "кому именно задавался вопрос с этим показателем, или null",
-      "question_audience_evidence": "дословная цитата о том, кому задавался вопрос, или null",
-      "general_population": "генеральная совокупность, на которую можно распространить результат, или null",
-      "general_population_reason": "почему методология позволяет такую экстраполяцию, или null",
-      "general_population_evidence": "дословная цитата из методологии о выборке, или null",
       "base_kind": "targetable_explicit | targetable_inferred | conditional | unknown",
       "base_reason": "почему эта база определена именно так или null",
       "methodology_evidence": "дословная цитата из методологии, подтверждающая базу, или null",
@@ -220,7 +205,6 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
 - Один материал может дать от 0 до {max_findings} находок. Не дублируй один показатель разными формулировками.
 - Сначала раздели находки одной страницы на смысловые блоки. В каждом блоке первая находка — базовая доля, остальные — уточнения внутри аудитории предыдущей находки.
 - finding_key уникален внутри материала. parent_key указывает на непосредственную родительскую находку того же блока. У базовой находки parent_key=null.
-- Если родительская база будет создана программой из категорий шкалы, укажи в parent_key ее composite_base_key.
 - block_index начинается с 1. Для разных базовых измерений, например «покупали» и «продавали», используй разные блоки.
 - Базовую находку каждого блока ставь раньше дочерних. Не связывай показатели, если вложенность знаменателей неоднозначна.
 - population_share — только доля от всего населения либо широкой демографической базы, заданной лишь географией, полом или возрастом.
@@ -235,11 +219,6 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
 - conditional используй для доли внутри поведенческой или иной нетаргетируемой группы. unknown — если база неясна.
 - В targeting_criteria перечисли id всех критериев, образующих базу. Новый возможный критерий дай коротким английским id: программа сохранит его кандидатом, но не одобрит автоматически.
 - behavior_period обязателен, когда в тексте указаны период, срок или частота покупки, продажи или пользования. Не заменяй им study_period исследования.
-- Для behavior_period_origin используй explicit, только если у текущего показателя прямо указан собственный период/частота; inherited — если он только наследуется от родительской базы; not_stated — если определить нельзя. Для explicit обязательна дословная behavior_period_evidence.
-- Категории одной шкалы частоты с одним вариантом ответа получат одинаковый scale_key, scale_choice_mode=single_choice и разные scale_category. Вопросы «любое число ответов» и иные множественные ответы помечай multiple_choice. Не называй шкалу single_choice только по догадке: приведи scale_evidence из формулировки, анкеты, подписи или структуры шкалы.
-- Если несколько непересекающихся категорий single_choice вместе образуют полезную базу, дай им одинаковый composite_base_key и composite_base_label, отметь include_in_composite_base=true. Например, «обычная практика» и «покупали несколько раз» образуют базу «взрослых россиян когда-либо приобретали подержанные товары». Категории «никогда», «затрудняюсь ответить» и любые multiple_choice не включай. Ничего не складывай самостоятельно.
-- question_audience — люди, которым задавался конкретный вопрос. Фразу «вопрос задавался тем, кто покупал...» сохрани дословно в question_audience_evidence. Это не то же самое, что генеральная совокупность исследования.
-- general_population заполняй как «взрослые россияне» только когда методология подтверждает всероссийскую выборку 18+ из разных регионов/населенных пунктов. Обязательны general_population_reason и дословная general_population_evidence. Иначе оставь эти поля null.
 - value обязано быть процентом от 0% до 100%. evidence должна быть дословным фрагментом переданного текста и подтверждать значение и человеческую аудиторию. Если процентной характеристики людей нет, не создавай находку.
 - Дата публикации не является периодом исследования.
 - Если пригодной статистики нет, relevant=false и findings=[].
@@ -267,27 +246,6 @@ FINDING_JSON_SCHEMA = {
         "percent_base": {"type": ["string", "null"]},
         "study_period": {"type": ["string", "null"]},
         "behavior_period": {"type": ["string", "null"]},
-        "behavior_period_origin": {
-            "type": "string",
-            "enum": ["explicit", "inherited", "not_stated"],
-        },
-        "behavior_period_evidence": {"type": ["string", "null"]},
-        "scale_key": {"type": ["string", "null"]},
-        "scale_category": {"type": ["string", "null"]},
-        "scale_choice_mode": {
-            "type": "string",
-            "enum": ["single_choice", "multiple_choice", "unknown", "not_applicable"],
-        },
-        "scale_evidence": {"type": ["string", "null"]},
-        "composite_base_key": {"type": ["string", "null"]},
-        "composite_base_label": {"type": ["string", "null"]},
-        "composite_base_behavior_period": {"type": ["string", "null"]},
-        "include_in_composite_base": {"type": "boolean"},
-        "question_audience": {"type": ["string", "null"]},
-        "question_audience_evidence": {"type": ["string", "null"]},
-        "general_population": {"type": ["string", "null"]},
-        "general_population_reason": {"type": ["string", "null"]},
-        "general_population_evidence": {"type": ["string", "null"]},
         "base_kind": {
             "type": "string",
             "enum": ["targetable_explicit", "targetable_inferred", "conditional", "unknown"],
@@ -318,21 +276,6 @@ FINDING_JSON_SCHEMA = {
         "percent_base",
         "study_period",
         "behavior_period",
-        "behavior_period_origin",
-        "behavior_period_evidence",
-        "scale_key",
-        "scale_category",
-        "scale_choice_mode",
-        "scale_evidence",
-        "composite_base_key",
-        "composite_base_label",
-        "composite_base_behavior_period",
-        "include_in_composite_base",
-        "question_audience",
-        "question_audience_evidence",
-        "general_population",
-        "general_population_reason",
-        "general_population_evidence",
         "base_kind",
         "base_reason",
         "methodology_evidence",
@@ -355,157 +298,6 @@ RESPONSE_JSON_SCHEMA = {
     },
     "required": ["relevant", "findings"],
 }
-
-# v6 keeps repeated methodology and denominator context outside individual
-# findings. The legacy internal shape remains the single input to validation and
-# calculation, and is produced deterministically by expand_model_answer().
-V6_FINDING_JSON_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "finding_key": {"type": "string"},
-        "parent_key": {"type": ["string", "null"]},
-        "question_key": {"type": "string"},
-        "indicator": {"type": ["string", "null"]},
-        "value": {"type": "string"},
-        "evidence": {"type": "string"},
-        "summary": {"type": "string"},
-        "indicator_type": {"type": "string", "enum": sorted(INDICATOR_TYPES)},
-        "ir_applicability": {"type": "string", "enum": sorted(IR_APPLICABILITY_VALUES)},
-        "scale_category": {"type": ["string", "null"]},
-        "include_in_composite_base": {"type": "boolean"},
-        "targeting_criteria": {
-            "type": "array", "items": {"type": "string"}, "uniqueItems": True,
-        },
-    },
-    "required": [
-        "finding_key", "parent_key", "question_key", "indicator", "value",
-        "evidence", "summary", "indicator_type", "ir_applicability",
-        "scale_category", "include_in_composite_base", "targeting_criteria",
-    ],
-}
-
-V6_QUESTION_JSON_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "question_key": {"type": "string"},
-        "audience": {"type": ["string", "null"]},
-        "audience_evidence": {"type": ["string", "null"]},
-        "percent_base": {"type": ["string", "null"]},
-        "behavior_period": {"type": ["string", "null"]},
-        "behavior_period_origin": {
-            "type": "string", "enum": ["explicit", "inherited", "not_stated"],
-        },
-        "behavior_period_evidence": {"type": ["string", "null"]},
-        "scale_key": {"type": ["string", "null"]},
-        "scale_choice_mode": {
-            "type": "string",
-            "enum": ["single_choice", "multiple_choice", "unknown", "not_applicable"],
-        },
-        "scale_evidence": {"type": ["string", "null"]},
-        "composite_base_key": {"type": ["string", "null"]},
-        "composite_base_label": {"type": ["string", "null"]},
-        "composite_base_behavior_period": {"type": ["string", "null"]},
-        "base_kind": {
-            "type": "string",
-            "enum": ["targetable_explicit", "targetable_inferred", "conditional", "unknown"],
-        },
-        "base_reason": {"type": ["string", "null"]},
-        "useful_for": {"type": ["string", "null"]},
-    },
-    "required": [
-        "question_key", "audience", "audience_evidence", "percent_base",
-        "behavior_period", "behavior_period_origin", "behavior_period_evidence",
-        "scale_key", "scale_choice_mode", "scale_evidence", "composite_base_key",
-        "composite_base_label", "composite_base_behavior_period", "base_kind",
-        "base_reason", "useful_for",
-    ],
-}
-
-V6_BLOCK_JSON_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "block_index": {"type": "integer", "minimum": 1},
-        "block_title": {"type": "string"},
-        "topic": {"type": ["string", "null"]},
-        "questions": {"type": "array", "items": V6_QUESTION_JSON_SCHEMA},
-        "findings": {"type": "array", "items": V6_FINDING_JSON_SCHEMA},
-    },
-    "required": ["block_index", "block_title", "topic", "questions", "findings"],
-}
-
-V6_CONTEXT_JSON_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "geography": {"type": ["string", "null"]},
-        "general_population": {"type": ["string", "null"]},
-        "general_population_reason": {"type": ["string", "null"]},
-        "general_population_evidence": {"type": ["string", "null"]},
-        "study_period": {"type": ["string", "null"]},
-        "methodology_evidence": {"type": ["string", "null"]},
-    },
-    "required": [
-        "geography", "general_population", "general_population_reason",
-        "general_population_evidence", "study_period", "methodology_evidence",
-    ],
-}
-
-RESPONSE_JSON_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "relevant": {"type": "boolean"},
-        "context": V6_CONTEXT_JSON_SCHEMA,
-        "blocks": {"type": "array", "items": V6_BLOCK_JSON_SCHEMA},
-    },
-    "required": ["relevant", "context", "blocks"],
-}
-
-PROMPT = """Ты извлекаешь только процентные доли людей для оценки аудиторий онлайн-опросов.
-
-Утвержденные таргетируемые критерии (id: название):
-{targeting_criteria}
-
-Источник: {source}
-Дата публикации: {published_at}
-Заголовок: {title}
-Текст публикации:
-{text}
-
-Верни один JSON по заданной схеме v6: relevant, общий context и смысловые blocks.
-Внутри блока вынеси повторяющийся знаменатель, период и шкалу в questions, а в
-findings ссылайся на них через question_key. Один блок — одна базовая логика
-(например, покупка или продажа); внутри него может быть несколько вопросов.
-Даже в режиме json_object используй точные имена полей схемы. Не создавай поля
-logic, block_key, denominator, period, scale или unit как вложенные объекты.
-Значение value всегда строка со знаком процента, например "14%". У каждой
-findings обязательны непустые summary, indicator и evidence. Повторяющийся
-контекст заполняй в context и questions через поля схемы, а не новым форматом.
-
-Правила:
-- Находка — только процент 0–100%, характеризующий людей. Не извлекай деньги,
-  заказы, продажи, рынок, средний чек, темпы роста, прогнозы и абсолютные числа.
-- Знаменателем всегда должны быть люди. Всегда укажи, среди кого посчитан процент.
-  Ищи базу в подписи к вопросу,
-  графику и методологии, а не только в предложении с числом.
-- Не вычисляй проценты. parent_key связывает условную долю с базовой находкой;
-  если база складывается программой, parent_key равен composite_base_key.
-- Непересекающиеся ответы single_choice можно объединить, только когда это
-  подтверждено вопросом/шкалой: задай общий composite_base_key и отметь нужные
-  findings include_in_composite_base=true. Multiple choice не складывай.
-- Всероссийскую выборку 18+ из разных регионов можно обозначить как «взрослые
-  россияне», сохранив дословную методологическую цитату.
-- Период поведения укажи на уровне question. У дочернего вопроса используй
-  inherited, если период совпадает с родительской базой; отдельный отличный
-  период укажи как explicit.
-- evidence и все поля *_evidence — точные фрагменты исходного текста.
-- Не дублируй показатели. Один материал может дать от 0 до {max_findings} находок
-  в исходных findings.
-- Если подходящих долей людей нет: relevant=false, context с null, blocks=[].
-"""
 
 # Learned once per process. OpenRouter may advertise structured outputs for the
 # model while no currently routable provider accepts the strict parameter set.
@@ -606,212 +398,10 @@ def parse_model_content(content, finish_reason=None):
     if not isinstance(answer, dict):
         raise ModelResponseError("структурированный ответ не является JSON-объектом")
     if not isinstance(answer.get("relevant"), bool) or not isinstance(
-        answer.get("blocks"), list
+        answer.get("findings"), list
     ):
-        raise ModelResponseError("в JSON отсутствуют корректные relevant/blocks")
+        raise ModelResponseError("в JSON отсутствуют корректные relevant/findings")
     return answer
-
-
-def expand_model_answer(answer):
-    """Expand compact v6 model output into the validated legacy finding shape."""
-    if not isinstance(answer, dict) or not isinstance(answer.get("blocks"), list):
-        return answer
-    context = answer.get("context") if isinstance(answer.get("context"), dict) else {}
-    general_population = context.get("general_population") or context.get("population_label")
-    general_population_evidence = (
-        context.get("general_population_evidence")
-        or context.get("population_evidence")
-        or context.get("sample_evidence")
-    )
-    methodology_evidence = (
-        context.get("methodology_evidence")
-        or context.get("method_evidence")
-        or general_population_evidence
-    )
-
-    def nested_text(value, *keys):
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-        if isinstance(value, dict):
-            for key in keys:
-                item = value.get(key)
-                if isinstance(item, str) and item.strip():
-                    return item.strip()
-        return None
-
-    def percent_value(raw):
-        value = raw.get("value")
-        if isinstance(value, (int, float, Decimal)) and "%" in str(raw.get("unit", "%")):
-            return f"{format_decimal(Decimal(str(value)))}%"
-        if isinstance(value, str):
-            value = value.strip()
-            if "%" not in value and "%" in str(raw.get("unit", "")):
-                value += "%"
-            return value
-        return value
-
-    def indicator_from_evidence(evidence, value, fallback):
-        if not evidence:
-            return fallback
-        number = str(value or "").replace("%", "").replace(",", r"[,.]")
-        phrase = re.sub(rf"(?<!\d){number}\s*%?", "", evidence, count=1)
-        phrase = re.sub(r"\s+", " ", phrase).strip(" .,:;–—-()")
-        return phrase[:500] or fallback
-
-    def composite_label(logic):
-        population = general_population or "респондентов"
-        logic = (logic or "имеют указанный опыт").strip()
-        lowered = logic.lower()
-        if lowered.startswith("покупка "):
-            return f"{population} когда-либо покупали {logic[len('покупка '):]}"
-        return f"{population} {logic}"
-
-    expanded = []
-    for block_number, raw_block in enumerate(answer["blocks"], 1):
-        if not isinstance(raw_block, dict):
-            expanded.append(raw_block)
-            continue
-        questions = {
-            item.get("question_key"): item
-            for item in raw_block.get("questions", [])
-            if isinstance(item, dict) and item.get("question_key")
-        }
-        raw_findings = raw_block.get("findings", [])
-        aliases = {}
-        component_groups = {}
-        for item in raw_findings:
-            if not isinstance(item, dict) or item.get("include_in_composite_base") is not True:
-                continue
-            key = item.get("composite_base_key")
-            value = parse_percent(percent_value(item))
-            if key and value is not None:
-                component_groups.setdefault(key, []).append((item, value))
-        referenced_keys = {
-            item.get("parent_key") for item in raw_findings if isinstance(item, dict)
-        }
-        for composite_key, components in component_groups.items():
-            if len(components) < 2:
-                continue
-            total = sum((value for _, value in components), Decimal("0"))
-            for item in raw_findings:
-                if not isinstance(item, dict) or item.get("include_in_composite_base") is True:
-                    continue
-                item_key = item.get("finding_key")
-                if (
-                    item_key in referenced_keys
-                    and parse_percent(percent_value(item)) == total
-                ):
-                    aliases[item_key] = composite_key
-                    break
-        for raw_finding in raw_block.get("findings", []):
-            if not isinstance(raw_finding, dict):
-                expanded.append(raw_finding)
-                continue
-            if raw_finding.get("finding_key") in aliases:
-                continue
-            question = questions.get(raw_finding.get("question_key"), {})
-            denominator = raw_finding.get("denominator") or question.get("denominator")
-            audience = question.get("audience") or nested_text(
-                denominator, "label", "audience", "population_label", "text", "value"
-            )
-            audience_evidence = question.get("audience_evidence") or nested_text(
-                denominator, "evidence", "quote", "source"
-            ) or question.get("question_text")
-            percent_base = question.get("percent_base") or audience_evidence or audience
-            parent_key = aliases.get(raw_finding.get("parent_key"), raw_finding.get("parent_key"))
-            base_kind = question.get("base_kind")
-            if not base_kind:
-                base_kind = (
-                    "conditional" if parent_key else
-                    "targetable_inferred" if general_population else "unknown"
-                )
-            scale = question.get("scale") if isinstance(question.get("scale"), dict) else {}
-            scale_mode = question.get("scale_choice_mode") or scale.get("type") or "unknown"
-            if str(scale_mode).startswith("multiple_choice"):
-                scale_mode = "multiple_choice"
-            period = question.get("period") if isinstance(question.get("period"), dict) else {}
-            behavior_period = question.get("behavior_period") or nested_text(
-                period, "label", "value", "text"
-            )
-            behavior_origin = question.get("behavior_period_origin") or period.get("type")
-            if behavior_origin not in {"explicit", "inherited", "not_stated"}:
-                behavior_origin = "not_stated"
-            behavior_evidence = question.get("behavior_period_evidence") or nested_text(
-                period, "evidence", "quote", "source"
-            )
-            value = percent_value(raw_finding)
-            evidence = raw_finding.get("evidence")
-            indicator = raw_finding.get("indicator") or indicator_from_evidence(
-                evidence, value, question.get("question_text") or raw_finding.get("finding_key")
-            )
-            composite_key = (
-                raw_finding.get("composite_base_key")
-                or question.get("composite_base_key")
-            )
-            summary = raw_finding.get("summary") or f"{value} {indicator}".strip()
-            expanded.append(
-                {
-                    "finding_key": raw_finding.get("finding_key"),
-                    "block_index": raw_block.get("block_index") or block_number,
-                    "block_title": raw_block.get("block_title") or raw_block.get("logic"),
-                    "parent_key": parent_key,
-                    "topic": raw_block.get("topic") or raw_block.get("logic"),
-                    "indicator_type": raw_finding.get("indicator_type") or (
-                        "conditional_share" if parent_key else "population_share"
-                    ),
-                    "ir_applicability": raw_finding.get("ir_applicability") or "direct",
-                    "geography": context.get("geography"),
-                    "audience": audience,
-                    "indicator": indicator,
-                    "value": value,
-                    "percent_base": percent_base,
-                    "study_period": context.get("study_period") or context.get("fieldwork_period"),
-                    "behavior_period": behavior_period,
-                    "behavior_period_origin": behavior_origin,
-                    "behavior_period_evidence": behavior_evidence,
-                    "scale_key": question.get("scale_key") or (
-                        raw_finding.get("question_key") if scale_mode != "not_applicable" else None
-                    ),
-                    "scale_category": raw_finding.get("scale_category") or indicator,
-                    "scale_choice_mode": scale_mode,
-                    "scale_evidence": question.get("scale_evidence") or question.get("question_text"),
-                    "composite_base_key": composite_key,
-                    "composite_base_label": question.get("composite_base_label") or (
-                        composite_label(raw_block.get("logic")) if composite_key else None
-                    ),
-                    "composite_base_behavior_period": question.get(
-                        "composite_base_behavior_period"
-                    ) or behavior_period,
-                    "include_in_composite_base": raw_finding.get(
-                        "include_in_composite_base"
-                    ) is True,
-                    "question_audience": audience,
-                    "question_audience_evidence": audience_evidence,
-                    "general_population": general_population,
-                    "general_population_reason": context.get("general_population_reason") or context.get("method"),
-                    "general_population_evidence": general_population_evidence,
-                    "base_kind": base_kind,
-                    "base_reason": question.get("base_reason") or (
-                        context.get("general_population_reason") or context.get("method")
-                        if base_kind == "targetable_inferred"
-                        else None
-                    ),
-                    "methodology_evidence": methodology_evidence,
-                    "targeting_criteria": raw_finding.get("targeting_criteria", []),
-                    "useful_for": question.get("useful_for"),
-                    "evidence": evidence,
-                    "summary": summary,
-                }
-            )
-    result = {
-        "relevant": answer.get("relevant") is True,
-        "findings": expanded,
-        "_raw_model_response": answer,
-    }
-    for meta in ("_response_meta", "_transport_meta"):
-        if meta in answer:
-            result[meta] = answer[meta]
-    return result
 
 
 def request_model_once(source, title, text, published_at, structured_mode):
@@ -842,9 +432,7 @@ def request_model_once(source, title, text, published_at, structured_mode):
         raise OpenRouterHTTPError(
             error.code, safe_excerpt(body_excerpt), structured_mode
         ) from error
-    answer = parse_model_content(content, choice.get("finish_reason"))
-    answer["_transport_meta"] = {"finish_reason": choice.get("finish_reason")}
-    return answer
+    return parse_model_content(content, choice.get("finish_reason"))
 
 
 def ask_model(source, title, text, published_at):
@@ -941,259 +529,19 @@ def parse_percent(value):
     return percent if Decimal("0") <= percent <= Decimal("100") else None
 
 
-def format_decimal(value):
-    rendered = format(value, "f")
-    if "." in rendered:
-        rendered = rendered.rstrip("0").rstrip(".")
-    return rendered.replace(".", ",")
-
-
-def display_percent(value):
-    """Apply the product rule: low fractions down, middle to .5, high up."""
-    whole = value.quantize(Decimal("1"), rounding=ROUND_FLOOR)
-    fraction = (value - whole).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    if fraction <= Decimal("0.40"):
-        return whole
-    if fraction <= Decimal("0.59"):
-        return whole + Decimal("0.5")
-    return whole + Decimal("1")
-
-
-def append_period(summary, period):
-    if not period or normalized(period) in normalized(summary):
-        return summary
-    return f"{summary.rstrip().rstrip('.')} {period}."
-
-
-def derived_summary(finding, root, displayed_value):
-    audience = root.get("audience") or root.get("percent_base") or "респондентов исследования"
-    indicator = finding.get("indicator") or finding.get("summary") or "имеют указанный признак"
-    own_period = finding.get("behavior_period")
-    root_period = root.get("behavior_period")
-    period = (
-        own_period
-        if finding.get("behavior_period_origin") == "explicit"
-        and normalized(own_period) != normalized(root_period)
-        else None
-    )
-    summary = f"{displayed_value} {audience} {indicator}".strip()
-    return append_period(summary, period)
-
-
-def classify_finding(finding):
-    """Classify a finding from fields already persisted in the database."""
-    if finding.get("is_derived"):
-        return "derived"
-    if (
-        finding.get("parent_finding_index") is None
-        and finding.get("base_kind")
-        in {"targetable_explicit", "targetable_inferred"}
-    ):
-        return "base"
-    return "conditional"
-
-
-def build_composite_bases(findings):
-    """Add deterministic bases formed by non-overlapping single-choice categories."""
-    groups = {}
-    for finding in findings:
-        if (
-            finding.get("include_in_composite_base")
-            and finding.get("scale_choice_mode") == "single_choice"
-            and finding.get("composite_base_key")
-        ):
-            key = (finding.get("block_index", 1), finding["composite_base_key"])
-            groups.setdefault(key, []).append(finding)
-
-    next_index = max((item.get("finding_index", 0) for item in findings), default=0) + 1
-    after_index = {}
-    for (block_index, composite_key), components in groups.items():
-        percents = [parse_percent(item.get("value")) for item in components]
-        labels = {item.get("composite_base_label") for item in components}
-        base_kinds = {item.get("base_kind") for item in components}
-        if (
-            len(components) < 2
-            or any(value is None for value in percents)
-            or len(labels) != 1
-            or None in labels
-            or not base_kinds.issubset({"targetable_explicit", "targetable_inferred"})
-        ):
-            continue
-        total = sum(percents, Decimal("0"))
-        if total > Decimal("100"):
-            continue
-
-        first = components[0]
-        label = next(iter(labels))
-        period_values = {
-            item.get("composite_base_behavior_period")
-            for item in components
-            if item.get("composite_base_behavior_period")
-        }
-        period = next(iter(period_values)) if len(period_values) == 1 else None
-        audience_values = {
-            item.get("general_population") or item.get("audience")
-            for item in components
-            if item.get("general_population") or item.get("audience")
-        }
-        audience = next(iter(audience_values)) if len(audience_values) == 1 else None
-        component_indices = [item["finding_index"] for item in components]
-        expression = " + ".join(
-            f"{format_decimal(value)}%" for value in percents
-        )
-        value = f"{format_decimal(total)}%"
-        synthetic = {
-            **first,
-            "finding_index": next_index,
-            "finding_key": composite_key,
-            "parent_key": None,
-            "parent_finding_index": None,
-            "block_index": block_index,
-            "indicator_type": "population_share",
-            "ir_applicability": "direct",
-            "audience": audience or first.get("audience"),
-            "indicator": label,
-            "value": value,
-            "behavior_period": period,
-            "behavior_period_origin": "explicit" if period else "not_stated",
-            "behavior_period_evidence": first.get("scale_evidence") if period else None,
-            "summary": f"{value} {label}".strip().rstrip(".") + ".",
-            "evidence": " | ".join(
-                item.get("evidence") for item in components if item.get("evidence")
-            ),
-            "base_kind": (
-                "targetable_explicit"
-                if base_kinds == {"targetable_explicit"}
-                else "targetable_inferred"
-            ),
-            "base_reason": "сумма взаимоисключающих категорий одной шкалы",
-            "scale_key": None,
-            "scale_category": None,
-            "scale_choice_mode": "not_applicable",
-            "scale_evidence": first.get("scale_evidence"),
-            "composite_base_key": None,
-            "composite_base_label": None,
-            "composite_base_behavior_period": None,
-            "include_in_composite_base": False,
-            "question_audience": None,
-            "question_audience_evidence": None,
-            "is_composite_base": True,
-            "composite_component_indices": component_indices,
-            "calculation_formula": f"{expression} = {value}",
-        }
-        after_index[components[-1]["finding_index"]] = synthetic
-        next_index += 1
-
-    result = []
-    block_positions = {}
-    for item in findings:
-        result.append(dict(item))
-        synthetic = after_index.get(item.get("finding_index"))
-        if synthetic:
-            result.append(synthetic)
-    for item in result:
-        block_index = item.get("block_index", 1)
-        block_positions[block_index] = block_positions.get(block_index, 0) + 1
-        item["block_position"] = block_positions[block_index]
-    composite_indices = {
-        item.get("finding_key"): item["finding_index"]
-        for item in result
-        if item.get("is_composite_base") and item.get("finding_key")
-    }
-    for item in result:
-        composite_parent = composite_indices.get(item.get("parent_key"))
-        if item.get("parent_finding_index") is None and composite_parent is not None:
-            item["parent_finding_index"] = composite_parent
-    return result
-
-
-def calculate_derived_findings(findings):
-    """Calculate only unambiguous percentage chains rooted in targetable bases."""
-    calculated = []
-    by_index = {}
-    root_by_index = {}
-
+def prepare_source_findings(findings):
+    """Keep source percentages unchanged and disable all derived calculations."""
+    prepared = []
     for original in findings:
         finding = dict(original)
-        composite_formula = finding.get("calculation_formula")
-        source_percent = parse_percent(finding.get("value"))
         finding["source_value"] = finding.get("value")
         finding["source_percent_base"] = finding.get("percent_base")
         finding["calculated_percent"] = None
-        finding["calculation_formula"] = (
-            composite_formula if finding.get("is_composite_base") else None
-        )
+        finding["calculation_formula"] = None
         finding["calculation_chain"] = None
         finding["is_derived"] = False
-
-        parent = by_index.get(finding.get("parent_finding_index"))
-        if parent is None:
-            eligible_root = (
-                source_percent is not None
-                and finding.get("base_kind")
-                in {"targetable_explicit", "targetable_inferred"}
-            )
-            if eligible_root:
-                finding["calculated_percent"] = source_percent
-                finding["calculation_chain"] = [
-                    {
-                        "finding_index": finding["finding_index"],
-                        "value": finding["source_value"],
-                        "percent": format(source_percent, "f"),
-                    }
-                ]
-                root_by_index[finding["finding_index"]] = finding
-            finding["summary"] = append_period(
-                finding["summary"], finding.get("behavior_period")
-            )
-        elif (
-            source_percent is not None
-            and finding.get("base_kind") == "conditional"
-            and parent.get("calculated_percent") is not None
-            and parent.get("calculation_chain")
-        ):
-            exact = (parent["calculated_percent"] * source_percent) / Decimal("100")
-            chain = list(parent["calculation_chain"]) + [
-                {
-                    "finding_index": finding["finding_index"],
-                    "value": finding["source_value"],
-                    "percent": format(source_percent, "f"),
-                }
-            ]
-            root = root_by_index.get(parent["finding_index"], root_by_index.get(parent.get("parent_finding_index")))
-            if root is None:
-                root = next(
-                    (
-                        item
-                        for item in calculated
-                        if item.get("calculation_chain")
-                        and item["finding_index"] == chain[0]["finding_index"]
-                    ),
-                    parent,
-                )
-            displayed = display_percent(exact)
-            displayed_value = f"{format_decimal(displayed)}%"
-            expression = " × ".join(
-                f"{format_decimal(Decimal(item['percent']))}%" for item in chain
-            )
-            finding["calculated_percent"] = exact
-            finding["calculation_chain"] = chain
-            finding["calculation_formula"] = (
-                f"{expression} = {format_decimal(exact)}%"
-            )
-            finding["value"] = displayed_value
-            finding["summary"] = derived_summary(finding, root, displayed_value)
-            finding["percent_base"] = root.get("audience") or root.get("percent_base")
-            finding["audience"] = root.get("audience") or root.get("percent_base")
-            finding["is_derived"] = True
-            root_by_index[finding["finding_index"]] = root
-
-        finding["finding_role"] = classify_finding(finding)
-        calculated.append(finding)
-        by_index[finding["finding_index"]] = finding
-        if finding.get("calculation_chain") and finding["calculation_chain"][0]["finding_index"] == finding["finding_index"]:
-            root_by_index[finding["finding_index"]] = finding
-    return calculated
+        prepared.append(finding)
+    return prepared
 
 
 def has_restricted_base(audience, percent_base):
@@ -1234,30 +582,12 @@ def normalized_ir_applicability(value, indicator_type, percent_base):
     return "indirect"
 
 
-def validate_answer(answer, text, audit=None):
-    def record(position, raw, accepted, code=None, reason=None, finding_index=None):
-        if audit is not None:
-            audit.append(
-                {
-                    "candidate_index": position,
-                    "raw_candidate": raw,
-                    "accepted": accepted,
-                    "rejection_code": code,
-                    "rejection_reason": reason,
-                    "finding_index": finding_index,
-                }
-            )
-
+def validate_answer(answer, text):
     if not isinstance(answer, dict) or answer.get("relevant") is not True:
         return []
     findings = answer.get("findings")
     if not isinstance(findings, list):
         return []
-
-    for position, raw in enumerate(
-        findings[MAX_FINDINGS_PER_MATERIAL:], MAX_FINDINGS_PER_MATERIAL + 1
-    ):
-        record(position, raw, False, "over_limit", "кандидат превышает лимит находок")
 
     valid = []
     known_keys = {}
@@ -1269,25 +599,11 @@ def validate_answer(answer, text, audit=None):
         "conditional",
         "unknown",
     }
-    scale_choice_modes = {
-        "single_choice",
-        "multiple_choice",
-        "unknown",
-        "not_applicable",
-    }
-    behavior_period_origins = {"explicit", "inherited", "not_stated"}
-    composite_keys = {
-        nullable_text(item.get("composite_base_key"), 100)
-        for item in findings
-        if isinstance(item, dict) and item.get("include_in_composite_base") is True
-    }
     for position, raw in enumerate(findings[:MAX_FINDINGS_PER_MATERIAL], 1):
         if not isinstance(raw, dict):
-            record(position, raw, False, "not_an_object", "кандидат не является объектом")
             continue
         finding_key = nullable_text(raw.get("finding_key"), 100) or f"finding_{position}"
         if finding_key in known_keys:
-            record(position, raw, False, "duplicate_key", "повторяющийся finding_key")
             continue
         raw_block_index = raw.get("block_index")
         block_index = (
@@ -1300,26 +616,12 @@ def validate_answer(answer, text, audit=None):
         value = nullable_text(raw.get("value"), 100)
         evidence = nullable_text(raw.get("evidence"), 500)
         if not summary:
-            record(position, raw, False, "missing_summary", "не заполнен summary")
             continue
         # Numeric findings require a verbatim quote containing the same numbers.
-        if value and not evidence_is_verbatim(evidence, text):
-            record(
-                position,
-                raw,
-                False,
-                "evidence_not_verbatim",
-                "цитата отсутствует в тексте материала",
-            )
-            continue
-        if value and not value_supported(value, evidence):
-            record(
-                position,
-                raw,
-                False,
-                "value_not_supported",
-                "число не подтверждается цитатой",
-            )
+        if value and (
+            not evidence_is_verbatim(evidence, text)
+            or not value_supported(value, evidence)
+        ):
             continue
         audience = nullable_text(raw.get("audience"), 500)
         percent_base = nullable_text(raw.get("percent_base"), 500)
@@ -1328,74 +630,6 @@ def validate_answer(answer, text, audit=None):
         methodology_evidence = nullable_text(raw.get("methodology_evidence"), 700)
         if methodology_evidence and not evidence_is_verbatim(methodology_evidence, text):
             methodology_evidence = None
-        scale_evidence = nullable_text(raw.get("scale_evidence"), 700)
-        if scale_evidence and not evidence_is_verbatim(scale_evidence, text):
-            scale_evidence = None
-        scale_choice_mode = raw.get("scale_choice_mode")
-        if scale_choice_mode not in scale_choice_modes:
-            scale_choice_mode = "unknown"
-        scale_key = nullable_text(raw.get("scale_key"), 100)
-        scale_category = nullable_text(raw.get("scale_category"), 300)
-        if (
-            scale_choice_mode in {"single_choice", "multiple_choice"}
-            and (not scale_key or not scale_category or not scale_evidence)
-        ):
-            scale_choice_mode = "unknown"
-        composite_base_key = nullable_text(raw.get("composite_base_key"), 100)
-        composite_base_label = nullable_text(raw.get("composite_base_label"), 500)
-        composite_base_behavior_period = nullable_text(
-            raw.get("composite_base_behavior_period"), 300
-        )
-        include_in_composite_base = raw.get("include_in_composite_base") is True
-        if (
-            scale_choice_mode != "single_choice"
-            or not composite_base_key
-            or not composite_base_label
-        ):
-            composite_base_key = None
-            composite_base_label = None
-            composite_base_behavior_period = None
-            include_in_composite_base = False
-        question_audience_evidence = nullable_text(
-            raw.get("question_audience_evidence"), 700
-        )
-        if question_audience_evidence and not evidence_is_verbatim(
-            question_audience_evidence, text
-        ):
-            question_audience_evidence = None
-        question_audience = nullable_text(raw.get("question_audience"), 500)
-        if question_audience and not question_audience_evidence:
-            question_audience = None
-        general_population_evidence = nullable_text(
-            raw.get("general_population_evidence"), 700
-        )
-        if general_population_evidence and not evidence_is_verbatim(
-            general_population_evidence, text
-        ):
-            general_population_evidence = None
-        general_population = nullable_text(raw.get("general_population"), 500)
-        general_population_reason = nullable_text(
-            raw.get("general_population_reason"), 700
-        )
-        if general_population and (
-            not general_population_reason or not general_population_evidence
-        ):
-            general_population = None
-            general_population_reason = None
-        behavior_period = nullable_text(raw.get("behavior_period"), 300)
-        behavior_period_origin = raw.get("behavior_period_origin")
-        if behavior_period_origin not in behavior_period_origins:
-            behavior_period_origin = "explicit" if behavior_period else "not_stated"
-        behavior_period_evidence = nullable_text(
-            raw.get("behavior_period_evidence"), 700
-        )
-        if behavior_period_evidence and not evidence_is_verbatim(
-            behavior_period_evidence, text
-        ):
-            behavior_period_evidence = None
-        if behavior_period_origin == "explicit" and not behavior_period_evidence:
-            # Backward-compatible answers may predate the explicit evidence field.
-            behavior_period_evidence = evidence if behavior_period else None
         base_kind = raw.get("base_kind")
         if base_kind not in base_kinds:
             base_kind = "unknown"
@@ -1409,15 +643,6 @@ def validate_answer(answer, text, audit=None):
         )
         parent_key = nullable_text(raw.get("parent_key"), 100)
         parent = known_keys.get(parent_key)
-        if parent_key and parent is None and parent_key not in composite_keys:
-            record(
-                position,
-                raw,
-                False,
-                "invalid_parent",
-                "родительский ключ не найден",
-            )
-            continue
         parent_finding_index = (
             parent["finding_index"]
             if parent and parent["block_index"] == block_index
@@ -1426,29 +651,18 @@ def validate_answer(answer, text, audit=None):
         indicator_type = normalized_indicator_type(
             raw.get("indicator_type"), audience, percent_base
         )
-        if parse_percent(value) is None or indicator_type is None:
-            record(position, raw, False, "invalid_percent", "значение не является долей людей 0–100%")
-            continue
-        if not has_human_denominator(percent_base, evidence, methodology_evidence):
-            record(
-                position,
-                raw,
-                False,
-                "missing_human_denominator",
-                "не подтверждён человеческий знаменатель",
+        if (
+            parse_percent(value) is None
+            or indicator_type is None
+            or not has_human_denominator(
+                percent_base, evidence, methodology_evidence
             )
+        ):
             continue
         # A conditional share is useful on its own only when the article states
         # the exact human group used as its denominator. Evidence that merely
         # mentions people elsewhere in the sentence is not enough.
         if indicator_type == "conditional_share" and not percent_base:
-            record(
-                position,
-                raw,
-                False,
-                "conditional_base_missing",
-                "не указана база условной доли",
-            )
             continue
         if indicator_type == "conditional_share":
             base_kind = "conditional"
@@ -1458,7 +672,6 @@ def validate_answer(answer, text, audit=None):
         finding = {
                 "finding_index": position,
                 "finding_key": finding_key,
-                "parent_key": parent_key,
                 "block_index": block_index,
                 "block_position": block_positions[block_index],
                 "block_title": nullable_text(raw.get("block_title"), 300),
@@ -1472,22 +685,7 @@ def validate_answer(answer, text, audit=None):
                 "value": value,
                 "percent_base": percent_base,
                 "study_period": nullable_text(raw.get("study_period"), 300),
-                "behavior_period": behavior_period,
-                "behavior_period_origin": behavior_period_origin,
-                "behavior_period_evidence": behavior_period_evidence,
-                "scale_key": scale_key,
-                "scale_category": scale_category,
-                "scale_choice_mode": scale_choice_mode,
-                "scale_evidence": scale_evidence,
-                "composite_base_key": composite_base_key,
-                "composite_base_label": composite_base_label,
-                "composite_base_behavior_period": composite_base_behavior_period,
-                "include_in_composite_base": include_in_composite_base,
-                "question_audience": question_audience,
-                "question_audience_evidence": question_audience_evidence,
-                "general_population": general_population,
-                "general_population_reason": general_population_reason,
-                "general_population_evidence": general_population_evidence,
+                "behavior_period": nullable_text(raw.get("behavior_period"), 300),
                 "base_kind": base_kind,
                 "base_reason": base_reason,
                 "methodology_evidence": methodology_evidence,
@@ -1499,7 +697,6 @@ def validate_answer(answer, text, audit=None):
             }
         valid.append(finding)
         known_keys[finding_key] = finding
-        record(position, raw, True, finding_index=position)
     return valid
 
 
@@ -1537,21 +734,14 @@ def save_result(conn, material_id, findings):
                        (material_id, finding_index, block_index, block_position, block_title,
                         parent_finding_index, topic, indicator_type, ir_applicability, geography,
                         audience, indicator, value, percent_base, study_period, behavior_period,
-                        behavior_period_origin, behavior_period_evidence, scale_key, scale_category,
-                        scale_choice_mode, scale_evidence, question_audience,
-                        question_audience_evidence, general_population, general_population_reason,
-                        general_population_evidence, useful_for, evidence, summary, source_value,
-                        source_percent_base,
+                        useful_for, evidence, summary, source_value, source_percent_base,
                         calculated_percent, calculation_formula, calculation_chain, base_kind,
                         base_reason, methodology_evidence, is_derived, targeting_criteria,
-                        candidate_criteria, composite_base_key, composite_base_label,
-                        composite_base_behavior_period, include_in_composite_base,
-                        is_composite_base, composite_component_indices, model, prompt_version)
+                        candidate_criteria, model, prompt_version)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                           %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s::jsonb,
-                           %s::jsonb, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                           %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s::jsonb,
+                           %s::jsonb, %s, %s)
                    ON CONFLICT (material_id, prompt_version, finding_index) DO NOTHING""",
                 (
                     material_id,
@@ -1570,17 +760,6 @@ def save_result(conn, material_id, findings):
                     finding["percent_base"],
                     finding["study_period"],
                     finding["behavior_period"],
-                    finding.get("behavior_period_origin"),
-                    finding.get("behavior_period_evidence"),
-                    finding.get("scale_key"),
-                    finding.get("scale_category"),
-                    finding.get("scale_choice_mode"),
-                    finding.get("scale_evidence"),
-                    finding.get("question_audience"),
-                    finding.get("question_audience_evidence"),
-                    finding.get("general_population"),
-                    finding.get("general_population_reason"),
-                    finding.get("general_population_evidence"),
                     finding["useful_for"],
                     finding["evidence"],
                     finding["summary"],
@@ -1597,16 +776,6 @@ def save_result(conn, material_id, findings):
                     finding["is_derived"],
                     json.dumps(finding["targeting_criteria"], ensure_ascii=False),
                     json.dumps(finding["candidate_criteria"], ensure_ascii=False),
-                    finding.get("composite_base_key"),
-                    finding.get("composite_base_label"),
-                    finding.get("composite_base_behavior_period"),
-                    finding.get("include_in_composite_base", False),
-                    finding.get("is_composite_base", False),
-                    json.dumps(
-                        finding.get("composite_component_indices"), ensure_ascii=False
-                    )
-                    if finding.get("composite_component_indices")
-                    else None,
                     MODEL,
                     PROMPT_VERSION,
                 ),
@@ -1618,69 +787,6 @@ def save_result(conn, material_id, findings):
             (status, PROMPT_VERSION, material_id),
         )
     return status
-
-
-def save_processing_audit(
-    conn, material_id, answer, audit, status, error=None
-):
-    """Persist public-safe model diagnostics without request headers or secrets."""
-    response_meta = (answer or {}).get("_response_meta") or {}
-    transport_meta = (answer or {}).get("_transport_meta") or {}
-    candidates = (answer or {}).get("findings")
-    candidate_count = len(candidates) if isinstance(candidates, list) else 0
-    accepted_count = sum(1 for item in audit if item.get("accepted"))
-    rejected_count = sum(1 for item in audit if not item.get("accepted"))
-    attempt_id = conn.execute(
-        """INSERT INTO processing_attempts
-               (material_id, prompt_version, model, structured_mode, status,
-                finish_reason, raw_response, error, candidate_count,
-                accepted_count, rejected_count)
-           VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
-           RETURNING id""",
-        (
-            material_id,
-            PROMPT_VERSION,
-            MODEL,
-            response_meta.get("structured_mode"),
-            status,
-            transport_meta.get("finish_reason"),
-            json.dumps(
-                (answer or {}).get("_raw_model_response", answer), ensure_ascii=False
-            )
-            if answer is not None
-            else None,
-            nullable_text(error, 1000),
-            candidate_count,
-            accepted_count,
-            rejected_count,
-        ),
-    ).fetchone()[0]
-    for item in audit:
-        conn.execute(
-            """INSERT INTO finding_candidates
-                   (attempt_id, candidate_index, raw_candidate, accepted,
-                    rejection_code, rejection_reason, finding_index)
-               VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s)""",
-            (
-                attempt_id,
-                item["candidate_index"],
-                json.dumps(item.get("raw_candidate"), ensure_ascii=False),
-                item["accepted"],
-                item.get("rejection_code"),
-                item.get("rejection_reason"),
-                item.get("finding_index"),
-            ),
-        )
-    conn.execute(
-        """UPDATE finding_candidates c
-           SET finding_id = f.id
-           FROM findings f
-           WHERE c.attempt_id = %s AND c.accepted
-             AND f.material_id = %s AND f.prompt_version = %s
-             AND f.finding_index = c.finding_index""",
-        (attempt_id, material_id, PROMPT_VERSION),
-    )
-    return attempt_id
 
 
 def process_new(conn):
@@ -1702,24 +808,10 @@ def process_new(conn):
                 ("done" if has_findings else "skipped", material_id),
             )
             continue
-        answer = None
-        validation_audit = []
         try:
-            answer = expand_model_answer(ask_model(source, title, text, published_at))
-            findings = calculate_derived_findings(
-                build_composite_bases(
-                    validate_answer(answer, text or "", audit=validation_audit)
-                )
-            )
+            answer = ask_model(source, title, text, published_at)
+            findings = prepare_source_findings(validate_answer(answer, text or ""))
         except Exception as error:
-            save_processing_audit(
-                conn,
-                material_id,
-                answer,
-                validation_audit,
-                "model_error",
-                f"{type(error).__name__}: {error}",
-            )
             conn.execute(
                 """UPDATE materials
                    SET status = 'failed', processing_error = %s
@@ -1730,16 +822,6 @@ def process_new(conn):
             continue
 
         save_result(conn, material_id, findings)
-        audit_status = (
-            "validation_empty"
-            if isinstance(answer.get("findings"), list)
-            and answer["findings"]
-            and not any(item.get("accepted") for item in validation_audit)
-            else "success"
-        )
-        save_processing_audit(
-            conn, material_id, answer, validation_audit, audit_status
-        )
         found += len(findings)
         if findings:
             db.log(SERVICE, f"материал {material_id} -> {len(findings)} статистических находок")
