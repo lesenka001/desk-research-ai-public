@@ -1,15 +1,20 @@
 import json
+import os
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import worker.main as worker_main
 from quality_check import error_details, run_check, write_report
 from worker.main import (
     ModelResponseError,
-    OpenRouterHTTPError,
+    OpenWebUIHTTPError,
     ask_model,
+    model_request_body,
     parse_model_content,
+    request_model_once,
+    require_model_config,
+    safe_excerpt,
 )
 
 
@@ -140,19 +145,73 @@ class QualityReportTests(unittest.TestCase):
         self.assertEqual(report[0]["accepted_findings"], [])
         self.assertEqual(report[1]["processing_status"], "ok")
 
-    def test_openrouter_http_diagnostics_are_safe_and_attributed(self):
-        error = OpenRouterHTTPError(
+    def test_openwebui_http_diagnostics_are_safe_and_attributed(self):
+        error = OpenWebUIHTTPError(
             404,
             "No endpoints; authorization Bearer [REDACTED]",
             "json_schema",
         )
         details = error_details(
-            error, "openrouter", "https://openrouter.ai/api/v1/chat/completions"
+            error, "openwebui", "https://inside.omirussia.ru/api/chat/completions"
         )
-        self.assertEqual(details["stage"], "openrouter")
+        self.assertEqual(details["stage"], "openwebui")
         self.assertEqual(details["http_status"], 404)
         self.assertEqual(details["structured_mode"], "json_schema")
-        self.assertNotIn("sk-or-", json.dumps(details))
+        self.assertNotIn("secret-key", json.dumps(details))
+
+    def test_openwebui_request_uses_internal_url_and_bearer_key(self):
+        response = MagicMock()
+        response.read.return_value = json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {"content": '{"relevant": false, "findings": []}'},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+        ).encode("utf-8")
+        response.__enter__.return_value = response
+        with (
+            patch.dict(os.environ, {"OPENWEBUI_API_KEY": "secret-key"}),
+            patch.object(worker_main, "MODEL", "test-model"),
+            patch.object(
+                worker_main,
+                "OPENWEBUI_URL",
+                "https://inside.omirussia.ru/api/chat/completions",
+            ),
+            patch("worker.main.urllib.request.urlopen", return_value=response) as open_url,
+        ):
+            answer = request_model_once("НАФИ", "Заголовок", "Текст", None, "json_object")
+        request = open_url.call_args.args[0]
+        self.assertEqual(
+            request.full_url, "https://inside.omirussia.ru/api/chat/completions"
+        )
+        self.assertEqual(request.get_header("Authorization"), "Bearer secret-key")
+        body = json.loads(request.data)
+        self.assertEqual(body["model"], "test-model")
+        self.assertNotIn("provider", body)
+        self.assertEqual(answer, {"relevant": False, "findings": []})
+
+    def test_model_must_be_explicitly_configured(self):
+        with patch.dict(os.environ, {"OPENWEBUI_API_KEY": "dummy-key"}):
+            with patch.object(worker_main, "MODEL", ""):
+                with self.assertRaisesRegex(RuntimeError, "MODEL"):
+                    require_model_config()
+
+    def test_error_excerpt_redacts_internal_key(self):
+        with patch.dict(os.environ, {"OPENWEBUI_API_KEY": "internal-secret"}):
+            excerpt = safe_excerpt(
+                "upstream echoed internal-secret and Bearer internal-secret"
+            )
+        self.assertNotIn("internal-secret", excerpt)
+        self.assertIn("[REDACTED]", excerpt)
+
+    def test_structured_schema_request_has_no_provider_specific_field(self):
+        with patch.object(worker_main, "MODEL", "test-model"):
+            body = model_request_body("НАФИ", "Заголовок", "Текст", None, "json_schema")
+        self.assertNotIn("provider", body)
+        self.assertEqual(body["response_format"]["type"], "json_schema")
 
 
 class StructuredResponseTests(unittest.TestCase):
@@ -181,16 +240,16 @@ class StructuredResponseTests(unittest.TestCase):
         )
 
     @patch("worker.main.request_model_once")
-    def test_ask_model_falls_back_from_unsupported_schema_404(self, request_once):
+    def test_ask_model_falls_back_from_unsupported_schema_400(self, request_once):
         request_once.side_effect = [
-            OpenRouterHTTPError(404, "No endpoints support the parameters", "json_schema"),
+            OpenWebUIHTTPError(400, "unsupported response_format json_schema", "json_schema"),
             {"relevant": False, "findings": []},
         ]
         result = ask_model("НАФИ", "Заголовок", "Текст", None)
         self.assertFalse(result["relevant"])
         self.assertEqual(result["_response_meta"]["structured_mode"], "json_object")
         self.assertEqual(
-            result["_response_meta"]["previous_attempts"][0]["http_status"], 404
+            result["_response_meta"]["previous_attempts"][0]["http_status"], 400
         )
         request_once.reset_mock()
         request_once.side_effect = None
@@ -201,6 +260,16 @@ class StructuredResponseTests(unittest.TestCase):
             request_once.call_args.kwargs["structured_mode"], "json_object"
         )
         self.assertFalse(second["_response_meta"]["strict_schema_available"])
+
+    @patch("worker.main.request_model_once")
+    def test_ask_model_does_not_treat_missing_model_as_schema_failure(self, request_once):
+        request_once.side_effect = OpenWebUIHTTPError(
+            404, "model not found", "json_schema"
+        )
+        with self.assertRaises(OpenWebUIHTTPError):
+            ask_model("НАФИ", "Заголовок", "Текст", None)
+        self.assertEqual(request_once.call_count, 1)
+        self.assertIsNone(worker_main.STRICT_JSON_SCHEMA_AVAILABLE)
 
     @patch("worker.main.request_model_once")
     def test_ask_model_raises_after_second_invalid_response(self, request_once):

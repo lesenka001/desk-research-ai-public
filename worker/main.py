@@ -12,8 +12,11 @@ from pathlib import Path
 import db
 
 SERVICE = "worker"
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = os.environ.get("MODEL", "anthropic/claude-haiku-5.5")
+OPENWEBUI_BASE_URL = os.environ.get(
+    "OPENWEBUI_BASE_URL", "https://inside.omirussia.ru"
+).rstrip("/")
+OPENWEBUI_URL = f"{OPENWEBUI_BASE_URL}/api/chat/completions"
+MODEL = os.environ.get("MODEL", "")
 DEFAULT_PROMPT_VERSION = "audience-human-shares-v4"
 PROMPT_VERSION = os.environ.get("PROMPT_VERSION", DEFAULT_PROMPT_VERSION)
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "10"))
@@ -299,8 +302,7 @@ RESPONSE_JSON_SCHEMA = {
     "required": ["relevant", "findings"],
 }
 
-# Learned once per process. OpenRouter may advertise structured outputs for the
-# model while no currently routable provider accepts the strict parameter set.
+# Learned once per process after the internal model rejects the strict schema.
 STRICT_JSON_SCHEMA_AVAILABLE = None
 
 
@@ -312,22 +314,33 @@ class ModelResponseError(RuntimeError):
         super().__init__(message)
 
 
-class OpenRouterHTTPError(RuntimeError):
-    """Safe OpenRouter HTTP diagnostics without request headers or credentials."""
+class OpenWebUIHTTPError(RuntimeError):
+    """Safe Open WebUI HTTP diagnostics without request headers or credentials."""
 
     def __init__(self, status, response_excerpt, structured_mode):
         self.status = status
         self.response_excerpt = response_excerpt
         self.structured_mode = structured_mode
         super().__init__(
-            f"OpenRouter HTTP {status} in {structured_mode} mode"
+            f"Open WebUI HTTP {status} in {structured_mode} mode"
         )
 
 
 def safe_excerpt(value, limit=800):
-    value = re.sub(r"sk-or-v1-[A-Za-z0-9_-]+", "[REDACTED]", value or "")
+    value = value or ""
+    key = os.environ.get("OPENWEBUI_API_KEY")
+    if key:
+        value = value.replace(key, "[REDACTED]")
+    value = re.sub(r"sk-[A-Za-z0-9_-]+", "[REDACTED]", value)
     value = re.sub(r"(?i)Bearer\s+\S+", "Bearer [REDACTED]", value)
     return re.sub(r"\s+", " ", value).strip()[:limit]
+
+
+def require_model_config():
+    if not os.environ.get("OPENWEBUI_API_KEY"):
+        raise RuntimeError("OPENWEBUI_API_KEY не задан")
+    if not MODEL:
+        raise RuntimeError("MODEL не задан: укажите ID модели из GET /api/models")
 
 
 def model_request_body(source, title, text, published_at, structured_mode):
@@ -360,7 +373,6 @@ def model_request_body(source, title, text, published_at, structured_mode):
         ],
     }
     if structured_mode == "json_schema":
-        body["provider"] = {"require_parameters": True}
         body["response_format"] = {
             "type": "json_schema",
             "json_schema": {
@@ -370,8 +382,7 @@ def model_request_body(source, title, text, published_at, structured_mode):
             },
         }
     else:
-        # Compatibility path used by the original workshop deployment. Local
-        # validation remains mandatory even when the provider only supports JSON mode.
+        # Local validation remains mandatory even when the model only supports JSON mode.
         body["response_format"] = {"type": "json_object"}
     return body
 
@@ -405,14 +416,15 @@ def parse_model_content(content, finish_reason=None):
 
 
 def request_model_once(source, title, text, published_at, structured_mode):
+    require_model_config()
     body = model_request_body(
         source, title, text, published_at, structured_mode=structured_mode
     )
     request = urllib.request.Request(
-        OPENROUTER_URL,
+        OPENWEBUI_URL,
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
         headers={
-            "Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}",
+            "Authorization": f"Bearer {os.environ['OPENWEBUI_API_KEY']}",
             "Content-Type": "application/json",
         },
     )
@@ -423,13 +435,13 @@ def request_model_once(source, title, text, published_at, structured_mode):
                 choice = payload["choices"][0]
                 content = choice["message"]["content"]
             except (json.JSONDecodeError, KeyError, IndexError, TypeError) as error:
-                raise ModelResponseError("некорректная оболочка ответа OpenRouter") from error
+                raise ModelResponseError("некорректная оболочка ответа Open WebUI") from error
     except urllib.error.HTTPError as error:
         try:
             body_excerpt = error.read(4096).decode("utf-8", errors="replace")
         except Exception:
             body_excerpt = ""
-        raise OpenRouterHTTPError(
+        raise OpenWebUIHTTPError(
             error.code, safe_excerpt(body_excerpt), structured_mode
         ) from error
     return parse_model_content(content, choice.get("finish_reason"))
@@ -457,15 +469,19 @@ def ask_model(source, title, text, published_at):
                 "strict_schema_available": STRICT_JSON_SCHEMA_AVAILABLE,
             }
             return answer
-        except (ModelResponseError, OpenRouterHTTPError) as error:
+        except (ModelResponseError, OpenWebUIHTTPError) as error:
             errors.append(str(error))
-            if isinstance(error, OpenRouterHTTPError):
-                if error.status == 404 and structured_mode == "json_schema":
+            if isinstance(error, OpenWebUIHTTPError):
+                format_error = error.status in {400, 422} and any(
+                    marker in error.response_excerpt.lower()
+                    for marker in ("response_format", "json_schema", "schema")
+                )
+                if format_error and structured_mode == "json_schema":
                     STRICT_JSON_SCHEMA_AVAILABLE = False
                 diagnostics.append(
                     {
-                        "stage": "openrouter_request",
-                        "service_url": OPENROUTER_URL,
+                        "stage": "openwebui_request",
+                        "service_url": OPENWEBUI_URL,
                         "http_status": error.status,
                         "structured_mode": error.structured_mode,
                         "response_excerpt": error.response_excerpt,
@@ -474,16 +490,18 @@ def ask_model(source, title, text, published_at):
             else:
                 diagnostics.append(
                     {
-                        "stage": "openrouter_response_parse",
-                        "service_url": OPENROUTER_URL,
+                        "stage": "openwebui_response_parse",
+                        "service_url": OPENWEBUI_URL,
                         "http_status": None,
                         "structured_mode": structured_mode,
                         "response_excerpt": None,
                         "message": str(error),
                     }
                 )
-            # Authentication/payment errors will not be fixed by changing format.
-            if isinstance(error, OpenRouterHTTPError) and error.status in {401, 402, 403}:
+            # Auth, model access and rate limits will not be fixed by changing format.
+            if isinstance(error, OpenWebUIHTTPError) and (
+                error.status not in {400, 422} or not format_error
+            ):
                 raise
     raise ModelResponseError(
         "две неудачные попытки структурированного ответа: " + "; ".join(errors),
@@ -843,6 +861,7 @@ def retry_failed(conn):
 
 
 def main():
+    require_model_config()
     conn = db.connect()
     db.init_schema(conn)
     mode = "с повторной обработкой старых материалов" if REPROCESS_OLD else "только новые материалы"

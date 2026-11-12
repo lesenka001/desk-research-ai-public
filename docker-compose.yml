@@ -1,5 +1,5 @@
 # Whole system in one resource: database, worker and bot.
-# Coolify fills the SERVICE_* values itself; you only set TELEGRAM_TOKEN and OPENROUTER_API_KEY.
+# Coolify fills the SERVICE_* values itself; set TELEGRAM_TOKEN, OPENWEBUI_API_KEY and MODEL.
 # The daily collection is a scheduled task in the worker container: python main.py collector
 services:
   postgres:
@@ -21,8 +21,9 @@ services:
     environment:
       - BLOCK=worker
       - DATABASE_URL=postgresql://${SERVICE_USER_POSTGRES}:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/desk_research
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - MODEL=${MODEL:-anthropic/claude-haiku-5.5}
+      - OPENWEBUI_BASE_URL=${OPENWEBUI_BASE_URL:-https://inside.omirussia.ru}
+      - OPENWEBUI_API_KEY=${OPENWEBUI_API_KEY}
+      - MODEL=${MODEL}
       - PROMPT_VERSION=${PROMPT_VERSION:-audience-human-shares-v4}
       - REPROCESS_OLD=${REPROCESS_OLD:-0}
       - REPROCESS_MATERIAL_IDS=${REPROCESS_MATERIAL_IDS:-}

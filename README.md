@@ -14,7 +14,7 @@
                  ↓
               Postgres
                  ↓
-          worker + OpenRouter
+          worker + Open WebUI
                  ↓
           web + Telegram bot
 ```
@@ -87,8 +87,9 @@ Copy-Item .env.example .env
 
 ```text
 DATABASE_URL=postgresql://user:password@localhost:5432/desk_research
-OPENROUTER_API_KEY=...
-MODEL=anthropic/claude-haiku-5.5
+OPENWEBUI_BASE_URL=https://inside.omirussia.ru
+OPENWEBUI_API_KEY=...
+MODEL=<ID from GET /api/models>
 ```
 
 Импортируйте переменные в текущую сессию PowerShell:
@@ -197,7 +198,7 @@ REPROCESS_MATERIAL_IDS=
 дословность подтверждения, блоки, сохранение исходных процентов без пересчёта и
 отображение в Mini App, Telegram и web.
 
-После настройки `OPENROUTER_API_KEY` можно проверить модель на восьми свежих
+После настройки `OPENWEBUI_API_KEY` можно проверить модель на восьми свежих
 публикациях без записи в базу:
 
 ```powershell
@@ -208,7 +209,7 @@ python quality_check.py
 Скрипт самостоятельно записывает `quality_report.json` в UTF-8, не пропуская
 кириллицу через кодировку PowerShell. Не перенаправляйте его вывод через
 `Tee-Object`: в консоли печатается только краткая сводка и путь к отчету.
-Для каждого материала используется строгая JSON Schema OpenRouter. При пустом,
+Для каждого материала используется строгая JSON Schema Open WebUI. При пустом,
 обрезанном, невалидном JSON или отсутствии совместимого strict-endpoint
 выполняется одна повторная попытка в совместимом режиме `json_object`. Повторная
 ошибка записывается в отчет со статусом `error`, после чего проверка продолжает

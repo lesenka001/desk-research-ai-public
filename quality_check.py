@@ -10,9 +10,9 @@ from pathlib import Path
 from collector.sources import READERS
 from worker.main import (
     MODEL,
-    OPENROUTER_URL,
+    OPENWEBUI_URL,
     PROMPT_VERSION,
-    OpenRouterHTTPError,
+    OpenWebUIHTTPError,
     ask_model,
     prepare_source_findings,
     safe_excerpt,
@@ -48,7 +48,7 @@ def error_details(error, stage, service_url):
         "http_status": None,
         "response_excerpt": None,
     }
-    if isinstance(error, OpenRouterHTTPError):
+    if isinstance(error, OpenWebUIHTTPError):
         details.update(
             http_status=error.status,
             response_excerpt=error.response_excerpt,
@@ -152,8 +152,8 @@ def run_check(
                         source_name,
                         item,
                         error,
-                        stage="openrouter",
-                        service_url=OPENROUTER_URL,
+                        stage="openwebui",
+                        service_url=OPENWEBUI_URL,
                     )
                 )
             # Keep a valid partial UTF-8 report even if a later publication fails.
@@ -162,8 +162,10 @@ def run_check(
 
 
 def main():
-    if not os.environ.get("OPENROUTER_API_KEY"):
-        raise SystemExit("OPENROUTER_API_KEY is required for the live quality check")
+    if not os.environ.get("OPENWEBUI_API_KEY"):
+        raise SystemExit("OPENWEBUI_API_KEY is required for the live quality check")
+    if not MODEL:
+        raise SystemExit("MODEL is required: use an ID from GET /api/models")
     per_source = int(os.environ.get("QUALITY_ITEMS_PER_SOURCE", "2"))
     total_limit = int(os.environ.get("QUALITY_TOTAL_ITEMS", "0")) or None
     output_path = Path(os.environ.get("QUALITY_REPORT_PATH", "quality_report.json"))
