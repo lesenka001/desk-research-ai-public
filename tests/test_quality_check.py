@@ -213,6 +213,29 @@ class QualityReportTests(unittest.TestCase):
         self.assertNotIn("provider", body)
         self.assertEqual(body["response_format"]["type"], "json_schema")
 
+    def test_strict_schema_uses_only_supported_constraints(self):
+        schema = worker_main.RESPONSE_JSON_SCHEMA
+        finding = schema["properties"]["findings"]["items"]
+        for object_schema in (schema, finding):
+            self.assertIs(object_schema["additionalProperties"], False)
+            self.assertEqual(
+                set(object_schema["required"]), set(object_schema["properties"])
+            )
+
+        def check_keywords(node):
+            if isinstance(node, dict):
+                self.assertFalse(
+                    {"uniqueItems", "minLength", "minimum"}.intersection(node),
+                    node,
+                )
+                for value in node.values():
+                    check_keywords(value)
+            elif isinstance(node, list):
+                for value in node:
+                    check_keywords(value)
+
+        check_keywords(schema)
+
 
 class StructuredResponseTests(unittest.TestCase):
     def setUp(self):
@@ -260,6 +283,23 @@ class StructuredResponseTests(unittest.TestCase):
             request_once.call_args.kwargs["structured_mode"], "json_object"
         )
         self.assertFalse(second["_response_meta"]["strict_schema_available"])
+
+    @patch("worker.main.request_model_once")
+    def test_ask_model_retries_qwen_grammar_rejection(self, request_once):
+        request_once.side_effect = [
+            OpenWebUIHTTPError(
+                400,
+                'Grammar error: Unimplemented keys: ["uniqueItems"]',
+                "json_schema",
+            ),
+            {"relevant": False, "findings": []},
+        ]
+        result = ask_model("НАФИ", "Заголовок", "Текст", None)
+        self.assertEqual(result["_response_meta"]["structured_mode"], "json_object")
+        self.assertEqual(request_once.call_count, 2)
+        self.assertEqual(
+            request_once.call_args_list[1].kwargs["structured_mode"], "json_object"
+        )
 
     @patch("worker.main.request_model_once")
     def test_ask_model_does_not_treat_missing_model_as_schema_failure(self, request_once):

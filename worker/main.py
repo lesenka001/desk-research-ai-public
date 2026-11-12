@@ -233,8 +233,8 @@ FINDING_JSON_SCHEMA = {
     "additionalProperties": False,
     "properties": {
         "topic": {"type": ["string", "null"]},
-        "finding_key": {"type": "string", "minLength": 1},
-        "block_index": {"type": "integer", "minimum": 1},
+        "finding_key": {"type": "string"},
+        "block_index": {"type": "integer"},
         "block_title": {"type": ["string", "null"]},
         "parent_key": {"type": ["string", "null"]},
         "indicator_type": {"type": "string", "enum": sorted(INDICATOR_TYPES)},
@@ -258,7 +258,6 @@ FINDING_JSON_SCHEMA = {
         "targeting_criteria": {
             "type": "array",
             "items": {"type": "string"},
-            "uniqueItems": True,
         },
         "useful_for": {"type": ["string", "null"]},
         "evidence": {"type": ["string", "null"]},
@@ -474,7 +473,13 @@ def ask_model(source, title, text, published_at):
             if isinstance(error, OpenWebUIHTTPError):
                 format_error = error.status in {400, 422} and any(
                     marker in error.response_excerpt.lower()
-                    for marker in ("response_format", "json_schema", "schema")
+                    for marker in (
+                        "response_format",
+                        "json_schema",
+                        "schema",
+                        "grammar error",
+                        "unimplemented keys",
+                    )
                 )
                 if format_error and structured_mode == "json_schema":
                     STRICT_JSON_SCHEMA_AVAILABLE = False
