@@ -286,6 +286,82 @@ class WorkerValidationTests(unittest.TestCase):
         self.assertEqual(validate_answer({"relevant": False, "findings": []}, TEXT), [])
 
 
+class VerbalShareTests(unittest.TestCase):
+    @staticmethod
+    def answer(value, evidence, percent_base="респондентов", summary=None):
+        return {
+            "relevant": True,
+            "findings": [
+                {
+                    "finding_key": "share",
+                    "block_index": 1,
+                    "parent_key": None,
+                    "indicator_type": "population_share",
+                    "ir_applicability": "direct",
+                    "audience": "взрослые россияне",
+                    "percent_base": percent_base,
+                    "value": value,
+                    "evidence": evidence,
+                    "summary": summary or f"{value} взрослых россиян сообщили об изменении.",
+                }
+            ],
+        }
+
+    def test_two_thirds_becomes_approximate_67_percent_with_original_source_value(self):
+        evidence = "Две трети респондентов не заметили перемен."
+        rows = prepare_source_findings(
+            validate_answer(self.answer("67%", evidence), evidence)
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["value"], "67%")
+        self.assertEqual(rows[0]["source_value"].lower(), "две трети")
+        self.assertEqual(rows[0]["evidence"], evidence)
+        self.assertIn("около 67%", rows[0]["summary"].lower())
+        self.assertIsNone(rows[0]["calculated_percent"])
+
+    def test_exact_half_does_not_need_approximate_wording(self):
+        evidence = "Половина респондентов купили подержанный товар."
+        rows = prepare_source_findings(
+            validate_answer(self.answer("50%", evidence), evidence)
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source_value"].lower(), "половина")
+        self.assertNotIn("около", rows[0]["summary"].lower())
+
+    def test_one_third_rounds_to_approximate_33_percent(self):
+        evidence = "Треть респондентов пользуется сервисом."
+        rows = prepare_source_findings(
+            validate_answer(self.answer("33%", evidence), evidence)
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source_value"].lower(), "треть")
+        self.assertIn("около 33%", rows[0]["summary"].lower())
+
+    def test_fraction_must_match_the_claimed_percentage(self):
+        evidence = "Две трети респондентов не заметили перемен."
+        self.assertEqual(validate_answer(self.answer("68%", evidence), evidence), [])
+        self.assertEqual(validate_answer(self.answer("50%", evidence), evidence), [])
+
+    def test_verbal_fraction_requires_human_denominator_and_verbatim_evidence(self):
+        evidence = "Две трети заказов оформлены онлайн."
+        self.assertEqual(
+            validate_answer(self.answer("67%", evidence, "заказов"), evidence), []
+        )
+        fabricated = "Две трети респондентов не заметили перемен."
+        source = "Половина респондентов не заметила перемен."
+        self.assertEqual(validate_answer(self.answer("67%", fabricated), source), [])
+
+    def test_numeric_percent_keeps_existing_source_value_and_quote(self):
+        evidence = "40% респондентов покупали подержанные товары."
+        rows = prepare_source_findings(
+            validate_answer(self.answer("40%", evidence), evidence)
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["value"], "40%")
+        self.assertEqual(rows[0]["source_value"], "40%")
+        self.assertEqual(rows[0]["evidence"], evidence)
+
+
 class TargetingCriteriaTests(unittest.TestCase):
     def test_f2_prompt_version_and_control_reprocessing_docs_are_synchronized(self):
         root = Path(__file__).parents[1]

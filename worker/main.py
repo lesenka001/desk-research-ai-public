@@ -531,16 +531,14 @@ def evidence_is_verbatim(evidence, text):
     return bool(evidence and normalized(evidence) in normalized(text))
 
 
-def numeric_tokens(value):
-    return [token.replace(",", ".") for token in re.findall(r"\d+(?:[.,]\d+)?", value or "")]
-
-
 def value_supported(value, evidence):
     if not value:
         return True
-    tokens = numeric_tokens(value)
-    evidence_numbers = {number.replace(",", ".") for number in numeric_tokens(evidence)}
-    return not tokens or all(token in evidence_numbers for token in tokens)
+    percent = parse_percent(value)
+    return percent is not None and any(
+        parse_percent(token) == percent
+        for token in re.findall(r"\d+(?:[.,]\d+)?\s*%", evidence or "")
+    )
 
 
 def parse_percent(value):
@@ -554,12 +552,66 @@ def parse_percent(value):
     return percent if Decimal("0") <= percent <= Decimal("100") else None
 
 
+VERBAL_FRACTIONS = (
+    (re.compile(r"(?<!\w)три\s+четверти(?!\w)", re.I), 75, False),
+    (re.compile(r"(?<!\w)две\s+трети(?!\w)", re.I), 67, True),
+    (re.compile(r"(?<!\w)(?:одна|одну)\s+треть(?!\w)", re.I), 33, True),
+    (re.compile(r"(?<!\w)половин(?:а|ы|у|е|ой)(?!\w)", re.I), 50, False),
+    (re.compile(r"(?<!\w)треть(?:ю)?(?!\w)", re.I), 33, True),
+    (re.compile(r"(?<!\w)четверт(?:ь|и|ью)(?!\w)", re.I), 25, False),
+)
+
+
+def supported_verbal_fraction(value, evidence):
+    """Return a single source fraction only when it proves the supplied value."""
+    if not value or not evidence or re.search(r"\d+(?:[.,]\d+)?\s*%", evidence):
+        return None
+    matches = []
+    for pattern, percent, approximate in VERBAL_FRACTIONS:
+        for match in pattern.finditer(evidence):
+            if not any(match.start() < end and match.end() > start for start, end, *_ in matches):
+                matches.append((match.start(), match.end(), match.group(), percent, approximate))
+    if len(matches) != 1:
+        return None
+    _, _, source_value, percent, approximate = matches[0]
+    supplied_percent = parse_percent(value)
+    if supplied_percent is None:
+        if normalized(value) != normalized(source_value):
+            return None
+    elif supplied_percent != Decimal(percent):
+        return None
+    return source_value, f"{percent}%", approximate
+
+
+def verbal_fraction_summary(summary, source_value, value, approximate):
+    """Show a validated verbal fraction as a percent, marking rounded ones."""
+    percentages = re.findall(r"\d+(?:[.,]\d+)?\s*%", summary)
+    if any(parse_percent(item) != parse_percent(value) for item in percentages):
+        return None
+    label = f"{'около ' if approximate else ''}{value}"
+    if re.search(rf"(?<!\d){re.escape(value[:-1])}\s*%", summary):
+        if not approximate:
+            return summary
+        pattern = rf"(?<!\w)(?:(?:около|примерно)\s+)?{re.escape(value[:-1])}\s*%"
+    else:
+        pattern = rf"(?<!\w){re.escape(source_value)}(?!\w)"
+        if not re.search(pattern, summary, re.I):
+            return None
+    return re.sub(
+        pattern,
+        lambda match: label.capitalize() if match.start() == 0 and match.group()[0].isupper() else label,
+        summary,
+        count=1,
+        flags=re.I,
+    )
+
+
 def prepare_source_findings(findings):
-    """Keep source percentages unchanged and disable all derived calculations."""
+    """Keep source evidence and disable calculations across separate findings."""
     prepared = []
     for original in findings:
         finding = dict(original)
-        finding["source_value"] = finding.get("value")
+        finding["source_value"] = finding.get("source_value") or finding.get("value")
         finding["source_percent_base"] = finding.get("percent_base")
         finding["calculated_percent"] = None
         finding["calculation_formula"] = None
@@ -642,12 +694,19 @@ def validate_answer(answer, text):
         evidence = nullable_text(raw.get("evidence"), 500)
         if not summary:
             continue
-        # Numeric findings require a verbatim quote containing the same numbers.
-        if value and (
-            not evidence_is_verbatim(evidence, text)
-            or not value_supported(value, evidence)
-        ):
+        # A number absent from the quote is valid only for a small, exact
+        # verbal-fraction allowlist. Other numeric evidence stays unchanged.
+        if value and not evidence_is_verbatim(evidence, text):
             continue
+        source_value = value
+        if value and not value_supported(value, evidence):
+            verbal = supported_verbal_fraction(value, evidence)
+            if verbal is None:
+                continue
+            source_value, value, approximate = verbal
+            summary = verbal_fraction_summary(summary, source_value, value, approximate)
+            if summary is None:
+                continue
         audience = nullable_text(raw.get("audience"), 500)
         percent_base = nullable_text(raw.get("percent_base"), 500)
         if percent_base and not evidence_is_verbatim(percent_base, text):
@@ -708,6 +767,7 @@ def validate_answer(answer, text):
                 "audience": audience,
                 "indicator": nullable_text(raw.get("indicator"), 500),
                 "value": value,
+                "source_value": source_value,
                 "percent_base": percent_base,
                 "study_period": nullable_text(raw.get("study_period"), 300),
                 "behavior_period": nullable_text(raw.get("behavior_period"), 300),
