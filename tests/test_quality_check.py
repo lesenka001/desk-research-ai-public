@@ -213,6 +213,42 @@ class QualityReportTests(unittest.TestCase):
         self.assertNotIn("provider", body)
         self.assertEqual(body["response_format"]["type"], "json_schema")
 
+    def test_qwen_request_disables_thinking_and_keeps_twenty_findings(self):
+        with patch.object(worker_main, "MODEL", "qwen3.8-27b"):
+            body = model_request_body("ФОМ", "Заголовок", "Текст", None, "json_schema")
+        self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
+        self.assertEqual(body["max_tokens"], 10000)
+        self.assertEqual(worker_main.MAX_FINDINGS_PER_MATERIAL, 20)
+        self.assertIn("от 0 до 20 находок", body["messages"][0]["content"])
+        self.assertNotIn("reasoning_effort", body)
+
+    def test_other_model_request_does_not_receive_qwen_thinking_setting(self):
+        with patch.object(worker_main, "MODEL", "gpt-6.1-sol"):
+            body = model_request_body("ФОМ", "Заголовок", "Текст", None, "json_schema")
+        self.assertNotIn("chat_template_kwargs", body)
+
+    def test_openwebui_request_allows_qwen_longer_timeout(self):
+        response = MagicMock()
+        response.read.return_value = json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {"content": '{"relevant": false, "findings": []}'},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+        ).encode("utf-8")
+        response.__enter__.return_value = response
+        with (
+            patch.dict(os.environ, {"OPENWEBUI_API_KEY": "test-key"}),
+            patch.object(worker_main, "MODEL", "qwen3.8-27b"),
+            patch("worker.main.urllib.request.urlopen", return_value=response) as open_url,
+        ):
+            answer = request_model_once("ФОМ", "Заголовок", "Текст", None, "json_schema")
+        self.assertEqual(open_url.call_args.kwargs["timeout"], 240)
+        self.assertFalse(answer["relevant"])
+
     def test_strict_schema_uses_only_supported_constraints(self):
         schema = worker_main.RESPONSE_JSON_SCHEMA
         finding = schema["properties"]["findings"]["items"]

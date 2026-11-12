@@ -89,8 +89,12 @@ Copy-Item .env.example .env
 DATABASE_URL=postgresql://user:password@localhost:5432/desk_research
 OPENWEBUI_BASE_URL=https://inside.omirussia.ru
 OPENWEBUI_API_KEY=...
-MODEL=<ID from GET /api/models>
+MODEL=qwen3.8-27b
+MAX_OUTPUT_TOKENS=10000
+MAX_FINDINGS_PER_MATERIAL=20
 ```
+
+Для Qwen worker отключает рассуждения через `chat_template_kwargs.enable_thinking=false` и ожидает ответ API до 240 секунд.
 
 Импортируйте переменные в текущую сессию PowerShell:
 
