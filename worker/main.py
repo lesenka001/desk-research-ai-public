@@ -17,7 +17,7 @@ OPENWEBUI_BASE_URL = os.environ.get(
 ).rstrip("/")
 OPENWEBUI_URL = f"{OPENWEBUI_BASE_URL}/api/chat/completions"
 MODEL = os.environ.get("MODEL", "")
-DEFAULT_PROMPT_VERSION = "audience-human-shares-v4"
+DEFAULT_PROMPT_VERSION = "audience-human-shares-v5"
 PROMPT_VERSION = os.environ.get("PROMPT_VERSION", DEFAULT_PROMPT_VERSION)
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "10"))
 RETRY_SECONDS = int(os.environ.get("RETRY_SECONDS", "3600"))
@@ -202,7 +202,7 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
 }}
 
 Правила:
-- Материал релевантен, только если содержит выраженную в процентах долю людей с каким-либо признаком. Подходят фактическое поведение, пользование, потребление, покупка, продажа, владение, знание, намерение, мнение, отношение и любая другая процентная характеристика аудитории.
+- Материал релевантен, только если содержит долю людей с каким-либо признаком, выраженную численным процентом или простой словесной дробью. Подходят фактическое поведение, пользование, потребление, покупка, продажа, владение, знание, намерение, мнение, отношение и любая другая доля аудитории.
 - Знаменателем всегда должны быть люди: население, респонденты, пользователи, покупатели, родители, сотрудники, руководители, представители компаний или другая явно названная группа людей. B2B-аудитории допустимы.
 - Не извлекай абсолютные количества, объем или долю рынка, долю заказов/продаж/выручки/трафика, средний чек, цены, темпы изменения и прогнозы рыночных или операционных показателей. Процент, знаменателем которого являются не люди, не является находкой.
 - Один материал может дать от 0 до {max_findings} находок. Не дублируй один показатель разными формулировками.
@@ -214,15 +214,17 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
 - conditional_share — любая доля внутри группы, уже отобранной по поведению, пользованию, покупке, владению, профессии, заболеванию или характеристике организации. Доли среди пользователей, покупателей, продавцов, клиентов, владельцев и работников всегда conditional_share, даже если они составляют всю выборку исследования.
 - ir_applicability=direct, только если показатель непосредственно является долей людей с нужным признаком относительно ясно указанной базы.
 - ir_applicability=indirect для отношения, намерения, частоты или связанного признака, который лишь помогает косвенно оценить ЦА.
-- На этом этапе не вычисляй итоговые проценты и не объединяй доли: извлеки исходные значения и точные связи parent_key. Арифметику выполнит программа после проверки цитат.
-- Перед заполнением percent_base проверь не только абзац с показателем, но и описание выборки/методологии. Укажи точную аудиторию, относительно которой посчитан процент. Для исследования на специальной выборке эта выборка является базой. Если показатель рассчитан на еще более узкой подгруппе, укажи именно ее. Копируй percent_base дословным компактным фрагментом исходного текста; если такого фрагмента нет или база достоверно не определяется, оставь null.
+- Не вычисляй вложенные доли и не объединяй разные показатели: извлекай исходные значения и точные связи parent_key. Разрешено только перевести простую словесную долю в процент по правилу ниже.
+- Перед заполнением percent_base проверь не только абзац с показателем, но и описание выборки/методологии. Укажи точную аудиторию, относительно которой посчитан процент. Для исследования на специальной выборке эта выборка является базой. Если показатель рассчитан на еще более узкой подгруппе, укажи именно ее. Копируй percent_base дословным компактным фрагментом исходного текста с тем же падежом и написанием, например «среди молодежи», а не нормализованным словом «молодёжь»; если такого фрагмента нет или база достоверно не определяется, оставь null.
+- В summary для широкой базы взрослых жителей России предпочитай естественную формулировку «взрослых россиян» вместо «населения 18+», только когда география России и возраст 18+ подтверждены текстом. Для специальной выборки или подгруппы сохраняй её собственное название и базу.
+- Включай в summary указанный в источнике период поведения, состояния, намерения или прогноза. Если общий период задан в предыдущем предложении, вопросе анкеты или начале абзаца и относится к нескольким показателям, перенеси его в каждую соответствующую формулировку. Не путай этот период с датой публикации или периодом проведения исследования и не придумывай его при отсутствии в тексте.
 - Географию, аудиторию, период и базу указывай только если они явно следуют из текста. Иначе null.
 - targetable_explicit используй, когда база прямо названа и состоит только из утвержденных таргетируемых критериев.
 - targetable_inferred используй только при обоснованном выводе из описания выборки/методологии. Тогда обязательны base_reason и дословная methodology_evidence.
 - conditional используй для доли внутри поведенческой или иной нетаргетируемой группы. unknown — если база неясна.
 - В targeting_criteria перечисли id всех критериев, образующих базу. Новый возможный критерий дай коротким английским id: программа сохранит его кандидатом, но не одобрит автоматически.
 - behavior_period обязателен, когда в тексте указаны период, срок или частота покупки, продажи или пользования. Не заменяй им study_period исследования.
-- value обязано быть процентом от 0% до 100%. evidence должна быть дословным фрагментом переданного текста и подтверждать значение и человеческую аудиторию. Если процентной характеристики людей нет, не создавай находку.
+- value обязано быть процентом от 0% до 100%. Для простых словесных долей «половина», «треть», «две трети», «четверть», «три четверти» переводи значение соответственно в 50%, около 33%, около 67%, 25%, 75%. Округлённую долю отмечай словом «около» в summary, например «две трети респондентов» → «около 67% респондентов». evidence должна дословно сохранять исходное словесное выражение или численный процент и подтверждать человеческую аудиторию. Не выводи численный процент из других, не перечисленных здесь словесных форм. Если проверяемой доли людей нет, не создавай находку.
 - Дата публикации не является периодом исследования.
 - Если пригодной статистики нет, relevant=false и findings=[].
 """
@@ -445,7 +447,15 @@ def request_model_once(source, title, text, published_at, structured_mode):
         raise OpenWebUIHTTPError(
             error.code, safe_excerpt(body_excerpt), structured_mode
         ) from error
-    return parse_model_content(content, choice.get("finish_reason"))
+    answer = parse_model_content(content, choice.get("finish_reason"))
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    details = usage.get("completion_tokens_details") if isinstance(usage, dict) else None
+    reasoning_tokens = (
+        details.get("reasoning_tokens") if isinstance(details, dict) else None
+    )
+    if type(reasoning_tokens) is int and reasoning_tokens >= 0:
+        answer["_reasoning_tokens"] = reasoning_tokens
+    return answer
 
 
 def ask_model(source, title, text, published_at):
@@ -462,12 +472,20 @@ def ask_model(source, title, text, published_at):
             answer = request_model_once(
                 source, title, text, published_at, structured_mode=structured_mode
             )
+            reasoning_tokens = answer.pop("_reasoning_tokens", None)
+            thinking_disabled_confirmed = (
+                reasoning_tokens == 0
+                if MODEL == "qwen3.8-27b" and reasoning_tokens is not None
+                else None
+            )
             if structured_mode == "json_schema":
                 STRICT_JSON_SCHEMA_AVAILABLE = True
             answer["_response_meta"] = {
                 "structured_mode": structured_mode,
                 "previous_attempts": diagnostics,
                 "strict_schema_available": STRICT_JSON_SCHEMA_AVAILABLE,
+                "reasoning_tokens": reasoning_tokens,
+                "thinking_disabled_confirmed": thinking_disabled_confirmed,
             }
             return answer
         except (ModelResponseError, OpenWebUIHTTPError) as error:
@@ -576,7 +594,11 @@ def supported_verbal_fraction(value, evidence):
     _, _, source_value, percent, approximate = matches[0]
     supplied_percent = parse_percent(value)
     if supplied_percent is None:
-        if normalized(value) != normalized(source_value):
+        rounded_match = re.fullmatch(r"около\s+(\d+)\s*%", value, re.I)
+        if rounded_match:
+            if not approximate or Decimal(rounded_match.group(1)) != Decimal(percent):
+                return None
+        elif normalized(value) != normalized(source_value):
             return None
     elif supplied_percent != Decimal(percent):
         return None

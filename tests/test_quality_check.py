@@ -143,7 +143,34 @@ class QualityReportTests(unittest.TestCase):
         self.assertEqual(len(report), 2)
         self.assertEqual(report[0]["processing_status"], "error")
         self.assertEqual(report[0]["accepted_findings"], [])
+        self.assertIsNone(report[0]["thinking_disabled_confirmed"])
         self.assertEqual(report[1]["processing_status"], "ok")
+
+    def test_quality_report_exposes_confirmed_thinking_state(self):
+        item = {
+            "title": "Контрольный материал",
+            "url": "https://example.org/study",
+            "text": "Текст",
+            "published_at": None,
+        }
+        answer = {
+            "relevant": False,
+            "findings": [],
+            "_response_meta": {
+                "reasoning_tokens": 0,
+                "thinking_disabled_confirmed": True,
+            },
+        }
+        with patch("quality_check.write_report"):
+            report = run_check(
+                [("ФОМ", "test", "https://example.org/feed")],
+                {"test": lambda url: iter([item])},
+                1,
+                Path("unused.json"),
+                model_call=lambda *args: answer,
+            )
+        self.assertEqual(report[0]["response_meta"]["reasoning_tokens"], 0)
+        self.assertIs(report[0]["thinking_disabled_confirmed"], True)
 
     def test_openwebui_http_diagnostics_are_safe_and_attributed(self):
         error = OpenWebUIHTTPError(
@@ -280,6 +307,62 @@ class StructuredResponseTests(unittest.TestCase):
     def test_parser_rejects_invalid_json(self):
         with self.assertRaises(ModelResponseError):
             parse_model_content('{"relevant": true, "findings": [}', "stop")
+
+    def test_qwen_reasoning_usage_is_reflected_in_response_metadata(self):
+        cases = ((0, True), (12, False), (None, None))
+        for reasoning_tokens, expected in cases:
+            with self.subTest(reasoning_tokens=reasoning_tokens):
+                payload = {
+                    "choices": [
+                        {
+                            "message": {"content": '{"relevant": false, "findings": []}'},
+                            "finish_reason": "stop",
+                        }
+                    ]
+                }
+                if reasoning_tokens is not None:
+                    payload["usage"] = {
+                        "completion_tokens_details": {
+                            "reasoning_tokens": reasoning_tokens
+                        }
+                    }
+                response = MagicMock()
+                response.read.return_value = json.dumps(payload).encode("utf-8")
+                response.__enter__.return_value = response
+                with (
+                    patch.dict(os.environ, {"OPENWEBUI_API_KEY": "test-key"}),
+                    patch.object(worker_main, "MODEL", "qwen3.8-27b"),
+                    patch.object(worker_main, "STRICT_JSON_SCHEMA_AVAILABLE", None),
+                    patch("worker.main.urllib.request.urlopen", return_value=response),
+                ):
+                    answer = ask_model("ФОМ", "Тест", "Текст", None)
+                meta = answer["_response_meta"]
+                self.assertEqual(meta["reasoning_tokens"], reasoning_tokens)
+                self.assertIs(meta["thinking_disabled_confirmed"], expected)
+                self.assertNotIn("usage", meta)
+
+    def test_non_qwen_reasoning_usage_does_not_claim_thinking_disabled(self):
+        response = MagicMock()
+        response.read.return_value = json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {"content": '{"relevant": false, "findings": []}'},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"completion_tokens_details": {"reasoning_tokens": 0}},
+            }
+        ).encode("utf-8")
+        response.__enter__.return_value = response
+        with (
+            patch.dict(os.environ, {"OPENWEBUI_API_KEY": "test-key"}),
+            patch.object(worker_main, "MODEL", "gpt-6.1-sol"),
+            patch.object(worker_main, "STRICT_JSON_SCHEMA_AVAILABLE", None),
+            patch("worker.main.urllib.request.urlopen", return_value=response),
+        ):
+            answer = ask_model("ФОМ", "Тест", "Текст", None)
+        self.assertIsNone(answer["_response_meta"]["thinking_disabled_confirmed"])
 
     @patch("worker.main.request_model_once")
     def test_ask_model_retries_invalid_structured_response_once(self, request_once):

@@ -89,6 +89,7 @@ def error_record(source_name, item, error, stage, service_url):
         "processing_status": "error",
         "error": error_details(error, stage, service_url),
         "response_meta": None,
+        "thinking_disabled_confirmed": None,
         "model_relevant": None,
         "model_findings": 0,
         "accepted_findings": [],
@@ -130,6 +131,7 @@ def run_check(
                 accepted = prepare_source_findings(
                     validate_answer(answer, item["text"])
                 )
+                response_meta = answer.get("_response_meta") or {}
                 report.append(
                     {
                         "source": source_name,
@@ -139,6 +141,9 @@ def run_check(
                         "processing_status": "ok",
                         "error": None,
                         "response_meta": answer.get("_response_meta"),
+                        "thinking_disabled_confirmed": response_meta.get(
+                            "thinking_disabled_confirmed"
+                        ),
                         "model_relevant": answer.get("relevant"),
                         "model_findings": len(answer.get("findings") or []),
                         "accepted_findings": accepted,
@@ -177,12 +182,23 @@ def main():
     accepted = sum(len(item["accepted_findings"]) for item in report)
     rejected = sum(item["rejected_by_validator"] for item in report)
     errors = sum(item["processing_status"] == "error" for item in report)
+    thinking_violations = sum(
+        item.get("thinking_disabled_confirmed") is False for item in report
+    )
+    thinking_unknown = 0
+    if MODEL == "qwen3.8-27b":
+        thinking_unknown = sum(
+            item["processing_status"] == "ok"
+            and item.get("thinking_disabled_confirmed") is None
+            for item in report
+        )
     # Keep stdout ASCII-only: Windows PowerShell 5 may decode native-process
     # output with an OEM code page. The actual report bypasses stdout entirely.
     print(
         f"UTF-8 report: {output_path.resolve()} | model={MODEL} | "
         f"prompt={PROMPT_VERSION} | publications={len(report)} | "
-        f"offered={offered} | accepted={accepted} | rejected={rejected} | errors={errors}"
+        f"offered={offered} | accepted={accepted} | rejected={rejected} | errors={errors} | "
+        f"thinking_violations={thinking_violations} | thinking_unknown={thinking_unknown}"
     )
 
 

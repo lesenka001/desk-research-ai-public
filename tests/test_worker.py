@@ -319,6 +319,23 @@ class VerbalShareTests(unittest.TestCase):
         self.assertIn("около 67%", rows[0]["summary"].lower())
         self.assertIsNone(rows[0]["calculated_percent"])
 
+    def test_qwen_approximate_value_from_two_thirds_is_normalized(self):
+        evidence = "Две трети респондентов не заметили перемен."
+        rows = prepare_source_findings(
+            validate_answer(self.answer("около 67%", evidence), evidence)
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["value"], "67%")
+        self.assertEqual(rows[0]["source_value"].lower(), "две трети")
+        self.assertEqual(rows[0]["evidence"], evidence)
+        self.assertIn("около 67%", rows[0]["summary"].lower())
+
+    def test_qwen_approximate_value_requires_matching_verbal_fraction(self):
+        verbal = "Две трети респондентов не заметили перемен."
+        numeric = "67% респондентов не заметили перемен."
+        self.assertEqual(validate_answer(self.answer("около 68%", verbal), verbal), [])
+        self.assertEqual(validate_answer(self.answer("около 67%", numeric), numeric), [])
+
     def test_exact_half_does_not_need_approximate_wording(self):
         evidence = "Половина респондентов купили подержанный товар."
         rows = prepare_source_findings(
@@ -363,18 +380,19 @@ class VerbalShareTests(unittest.TestCase):
 
 
 class TargetingCriteriaTests(unittest.TestCase):
-    def test_f2_prompt_version_and_control_reprocessing_docs_are_synchronized(self):
+    def test_prompt_version_and_control_reprocessing_docs_are_synchronized(self):
         root = Path(__file__).parents[1]
         env_example = (root / ".env.example").read_text(encoding="utf-8")
         compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
 
-        self.assertEqual(DEFAULT_PROMPT_VERSION, "audience-human-shares-v4")
+        self.assertEqual(DEFAULT_PROMPT_VERSION, "audience-human-shares-v5")
         self.assertIn(f"PROMPT_VERSION={DEFAULT_PROMPT_VERSION}", env_example)
         self.assertIn(
             f"PROMPT_VERSION=${{PROMPT_VERSION:-{DEFAULT_PROMPT_VERSION}}}",
             compose,
         )
+        self.assertIn(f"PROMPT_VERSION={DEFAULT_PROMPT_VERSION}", readme)
         self.assertIn("REPROCESS_OLD=0", env_example)
         self.assertIn("REPROCESS_OLD=${REPROCESS_OLD:-0}", compose)
         self.assertIn("REPROCESS_MATERIAL_IDS=<ID>,29,30", readme)
@@ -460,6 +478,29 @@ class FindingBlockExtractionTests(unittest.TestCase):
         self.assertIn("знаменателем всегда должны быть люди", prompt.lower())
         self.assertNotIn("absolute_count", prompt)
         self.assertNotIn("market_metric", prompt)
+
+    def test_prompt_requests_source_period_natural_adult_base_and_verbal_fraction(self):
+        text = (
+            "За последние два-три месяца финансовое положение улучшилось у 5% граждан, "
+            "среди молодежи этот показатель выше – 13%. "
+            "Две трети респондентов не заметили изменений."
+        )
+        body = model_request_body("ФОМ", "Динамика материального положения", text, None, "json_schema")
+        prompt = body["messages"][0]["content"].lower()
+        self.assertIn(text.lower(), prompt)
+        self.assertIn("взрослых россиян", prompt)
+        self.assertIn("summary", prompt)
+        self.assertIn("период", prompt)
+        self.assertRegex(
+            prompt,
+            r"период.{0,120}предыдущем предложении.{0,160}каждую соответствующую формулировку",
+        )
+        self.assertIn("среди молодежи", prompt)
+        self.assertIn("percent_base", prompt)
+        self.assertIn("дословн", prompt)
+        self.assertIn("две трети", prompt)
+        self.assertIn("около 67%", prompt)
+        self.assertIn("evidence", prompt)
 
     def test_extracts_two_blocks_with_parent_links_and_periods(self):
         text = (
