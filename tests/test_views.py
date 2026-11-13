@@ -12,10 +12,12 @@ from bot.main import (
     finding_lines,
     group_findings,
     page_data,
+    public_findings,
     render_page,
     send_new,
 )
 from web.main import render
+import web.main as web_main
 
 
 class Rows:
@@ -153,6 +155,76 @@ class EmptyWebConnection:
 
 
 class ViewTests(unittest.TestCase):
+    def test_defensive_publication_requires_complete_explicit_metadata(self):
+        valid = dict(material_id=10, is_primary=True, population_scope="base",
+                     primary_reason="Главный вывод исследования")
+        rows = [dict(valid, id=1, is_primary="true"),
+                dict(valid, id=2, is_primary=1),
+                dict(valid, id=3, population_scope="unknown"),
+                dict(valid, id=4, primary_reason=None),
+                dict(valid, id=5, primary_reason=" \t "),
+                dict(valid, id=6, is_demographic_breakdown=True),
+                dict(valid, id=7),
+                dict(valid, id=8, population_scope="conditional"),
+                dict(id=9, material_id=10),
+                dict(id=10, material_id=10, is_primary=None),
+                dict(valid, id=11), dict(valid, id=12)]
+        self.assertEqual([row["id"] for row in public_findings(rows)], [7, 8, 9, 10, 11])
+        groups = group_findings(rows)
+        self.assertEqual([row["id"] for block in groups[0]["blocks"]
+                          for row in block["findings"]], [7, 8, 9, 10, 11])
+
+    def test_defensive_renderer_cap_excludes_unselected_and_composition(self):
+        rows = [dict(id=1, material_id=10, is_primary=False),
+                dict(id=2, material_id=10, is_demographic_breakdown=True)]
+        rows += [dict(id=i, material_id=material, block_index=i, block_position=1)
+                 for material in (10, 20) for i in range(3, 11)]
+        result = public_findings(rows)
+        self.assertEqual(len(result), 10)
+        for material in (10, 20):
+            self.assertEqual([row["id"] for row in result if row["material_id"] == material],
+                             [3, 4, 5, 6, 7])
+        groups = group_findings(rows)
+        self.assertEqual(len(groups), 2)
+        for group in groups:
+            self.assertEqual(sum(len(block["findings"]) for block in group["blocks"]), 5)
+
+    def test_mini_app_audit_data_keeps_scope_reason_and_rank(self):
+        class AuditConnection(MiniAppQueryConnection):
+            def execute(self, query, params=None):
+                if "SELECT f.id, m.id" not in query:
+                    return super().execute(query, params)
+                self.queries.append((query, params))
+                row = [None] * 45
+                for index, value in {
+                    0: 1, 1: 10, 2: 1, 3: "40% россиян выбирают сервис.", 5: "40%",
+                    6: 1, 7: 1, 10: "population_share", 12: "россияне", 13: "россиян",
+                    24: "targetable_explicit", 27: False, 28: [], 29: [],
+                    30: "Материал", 31: "https://example.org/study", 35: "ФОМ",
+                    40: "base", 41: True, 42: 1, 43: "Главный вывод <источника>", 44: False,
+                }.items():
+                    row[index] = value
+                return Rows([tuple(row)])
+
+        data = page_data(AuditConnection())
+        finding = data["findings"][0]
+        self.assertEqual(finding["population_scope"], "base")
+        self.assertIs(finding["is_primary"], True)
+        self.assertEqual(finding["primary_rank"], 1)
+        self.assertEqual(finding["primary_reason"], "Главный вывод <источника>")
+        self.assertIs(finding["is_demographic_breakdown"], False)
+        with patch("bot.main.page_data", return_value=data):
+            page = render_page(object())
+        self.assertIn("Почему основная", page)
+        self.assertIn("esc(f.primary_reason)", page)
+        self.assertIn("f.population_scope", page)
+
+    def test_web_and_bot_share_primary_publication_predicate(self):
+        self.assertEqual(web_main.CURRENT_AUDIENCE_FINDING_SQL, CURRENT_AUDIENCE_FINDING_SQL)
+        compact = "".join(CURRENT_AUDIENCE_FINDING_SQL.lower().split())
+        self.assertIn("coalesce(f.is_primary,true)", compact)
+        self.assertIn("f.is_demographic_breakdown", compact)
+
     def test_audience_filter_percent_is_safe_with_and_without_parameters(self):
         plain_query = PostgresQuery(Transformer())
         plain_query.convert(

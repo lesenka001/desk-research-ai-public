@@ -292,6 +292,8 @@ function renderDetail(f) {
       ${f.geography ? `<p class="key">География: ${esc(f.geography)}</p>` : ""}
       ${f.study_period ? `<p class="key">Период исследования: ${esc(f.study_period)}</p>` : ""}
       ${f.behavior_period ? `<p class="key">Период/частота поведения: ${esc(f.behavior_period)}</p>` : ""}
+      ${f.population_scope ? `<p class="key">Классификация базы: ${esc(({base: "базовая (таргетируемая)", conditional: "условная", unknown: "не определена"})[f.population_scope] || f.population_scope)}</p>` : ""}
+      ${f.primary_reason ? `<p class="key">Почему основная: ${esc(f.primary_reason)}</p>` : ""}
       ${f.useful_for ? `<p>${esc(f.useful_for)}</p>` : ""}
       ${f.evidence ? `<p class="excerpt">Подтверждение: «${esc(f.evidence)}»</p>` : ""}
     </div>

@@ -226,6 +226,42 @@ class QualityReportTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "MODEL"):
                     require_model_config()
 
+    def test_legacy_prompt_version_is_rejected_before_api_request(self):
+        for version in ("audience-human-shares-v5", "audience-targetable-bases-v6"):
+            with (
+                self.subTest(version=version),
+                patch.object(worker_main, "PROMPT_VERSION", version),
+                patch.object(worker_main, "MODEL", "qwen3.8-27b"),
+                patch.dict(os.environ, {"OPENWEBUI_API_KEY": "dummy-key"}),
+                patch("worker.main.urllib.request.urlopen") as open_url,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "PROMPT_VERSION"):
+                    request_model_once("ФОМ", "Материал", "Текст", None, "json_object")
+                open_url.assert_not_called()
+
+    def test_legacy_prompt_version_stops_worker_before_database_access(self):
+        for version in ("audience-human-shares-v5", "audience-targetable-bases-v6"):
+            with (
+                self.subTest(version=version),
+                patch.object(worker_main, "PROMPT_VERSION", version),
+                patch("worker.main.db.connect") as connect,
+                patch("worker.main.db.init_schema") as init_schema,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "PROMPT_VERSION"):
+                    worker_main.main()
+                connect.assert_not_called()
+                init_schema.assert_not_called()
+
+    def test_current_and_custom_prompt_versions_pass_configuration_guard(self):
+        for version in ("audience-primary-findings-v7", "audience-primary-findings-v7-control"):
+            with (
+                self.subTest(version=version),
+                patch.object(worker_main, "PROMPT_VERSION", version),
+                patch.object(worker_main, "MODEL", "qwen3.8-27b"),
+                patch.dict(os.environ, {"OPENWEBUI_API_KEY": "dummy-key"}),
+            ):
+                require_model_config()
+
     def test_error_excerpt_redacts_internal_key(self):
         with patch.dict(os.environ, {"OPENWEBUI_API_KEY": "internal-secret"}):
             excerpt = safe_excerpt(
@@ -240,13 +276,13 @@ class QualityReportTests(unittest.TestCase):
         self.assertNotIn("provider", body)
         self.assertEqual(body["response_format"]["type"], "json_schema")
 
-    def test_qwen_request_disables_thinking_and_keeps_twenty_findings(self):
+    def test_qwen_request_disables_thinking_and_keeps_thirty_findings(self):
         with patch.object(worker_main, "MODEL", "qwen3.8-27b"):
             body = model_request_body("ФОМ", "Заголовок", "Текст", None, "json_schema")
         self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
         self.assertEqual(body["max_tokens"], 10000)
-        self.assertEqual(worker_main.MAX_FINDINGS_PER_MATERIAL, 20)
-        self.assertIn("от 0 до 20 находок", body["messages"][0]["content"])
+        self.assertEqual(worker_main.MAX_FINDINGS_PER_MATERIAL, 30)
+        self.assertIn("от 0 до 30 находок", body["messages"][0]["content"])
         self.assertNotIn("reasoning_effort", body)
 
     def test_other_model_request_does_not_receive_qwen_thinking_setting(self):

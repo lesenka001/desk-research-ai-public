@@ -48,7 +48,7 @@ RSS используется для обнаружения URL. Collector доп
 - утвержденные таргетируемые критерии и неподтвержденные кандидаты;
 - модель и версия промпта.
 
-Один материал может содержать до 20 находок. Значение сохраняется только как
+Один материал может содержать до 30 находок. Значение сохраняется только как
 процент от явно подтверждённой группы людей: населения, респондентов,
 пользователей, покупателей, работников, B2B-респондентов или другой аудитории.
 Дословная цитата должна присутствовать в собранном тексте и содержать то же
@@ -67,8 +67,7 @@ RSS используется для обнаружения URL. Collector доп
 добавляется в утверждённый список автоматически.
 
 Лента группирует находки сначала по исходной странице, затем по смысловым
-блокам и перечисляет их в порядке исходного материала. Ролевого деления на
-базовые, производные и условные находки нет.
+блокам и перечисляет их в порядке исходного материала. База классифицируется независимо от выбора основных находок.
 
 ## Локальный запуск
 
@@ -91,13 +90,13 @@ OPENWEBUI_BASE_URL=https://inside.omirussia.ru
 OPENWEBUI_API_KEY=...
 MODEL=qwen3.8-27b
 MAX_OUTPUT_TOKENS=10000
-MAX_FINDINGS_PER_MATERIAL=20
-PROMPT_VERSION=audience-targetable-bases-v6
+MAX_FINDINGS_PER_MATERIAL=30
+PROMPT_VERSION=audience-primary-findings-v7
 ```
 
 Для Qwen worker отключает рассуждения через `chat_template_kwargs.enable_thinking=false` и ожидает ответ API до 240 секунд.
 Контрольный отчёт показывает `reasoning_tokens` и сообщает, если рассуждения Qwen не отключились или API не вернул счётчик.
-Промпт v5 сохраняет в формулировках период и дословную базу; простые словесные доли людей переводятся в проценты с исходным выражением в `source_value` и цитатой в `evidence` (например, «две трети» → «около 67%»).
+Промпт v7 сохраняет в формулировках период и дословную базу; простые словесные доли людей переводятся в проценты с исходным выражением в `source_value` и цитатой в `evidence` (например, «две трети» → «около 67%»).
 
 Импортируйте переменные в текущую сессию PowerShell:
 
@@ -137,7 +136,7 @@ Telegram нужен публичный HTTPS-туннель и переменн�
 ## Повторная обработка
 
 Обычный перезапуск worker не обрабатывает материал повторно с той же версией
-промпта. Версия строгого отбора долей людей — `audience-targetable-bases-v6`.
+промпта. Версия строгого отбора долей людей — `audience-primary-findings-v7`.
 
 ### Контрольный прогон в Coolify
 
@@ -153,17 +152,17 @@ psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT id, title, processed_promp
 В Environment Variables установите, подставив найденный id вместо `<ID>`:
 
 ```text
-PROMPT_VERSION=audience-targetable-bases-v6
+PROMPT_VERSION=audience-primary-findings-v7
 REPROCESS_OLD=1
 REPROCESS_MATERIAL_IDS=<ID>,29,30
-MAX_FINDINGS_PER_MATERIAL=20
+MAX_FINDINGS_PER_MATERIAL=30
 ```
 
 Сохраните переменные и выполните redeploy. После завершения worker проверьте
 результат запросом:
 
 ```sh
-psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT m.id, m.title, f.block_index, f.block_position, f.value, f.percent_base, f.summary FROM findings f JOIN materials m ON m.id=f.material_id WHERE f.prompt_version='audience-targetable-bases-v6' AND m.id IN (<ID>,29,30) ORDER BY m.id, f.block_index, f.block_position;"
+psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT m.id, m.title, f.block_index, f.block_position, f.value, f.percent_base, f.summary FROM findings f JOIN materials m ON m.id=f.material_id WHERE f.prompt_version='audience-primary-findings-v7' AND m.id IN (<ID>,29,30) ORDER BY m.id, f.block_index, f.block_position;"
 ```
 
 Ожидаемый результат:
@@ -238,3 +237,13 @@ python main.py collector
 
 Рекомендуемое расписание — один раз в сутки. Секреты `.env`, токены, внутренние
 Excel-файлы и дампы базы нельзя добавлять в Git.
+
+
+## SPEC 003: основные находки
+
+Сохраняются до 30 проверенных находок на материал, публикуются до 5 основных.
+Приоритет у таргетируемых баз, при их отсутствии допустимы условные.
+Возрастные и географические разбивки состава выборки остаются в базе.
+Перед обновлением задайте PROMPT_VERSION=audience-primary-findings-v7.
+Worker отвергает устаревшие версии v5/v6 до обращения к БД и API.
+Подробности: specs/003-primary-findings-comparison/runtime.md.

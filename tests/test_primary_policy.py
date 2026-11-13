@@ -60,6 +60,8 @@ class PopulationScopeTests(unittest.TestCase):
     def test_approved_targetable_groups_remain_base_for_conditional_share(self):
         cases = (
             ("пользователей банковских карт", ["banking_product_use"]),
+            ("клиентов банка", ["banking_product_use"]),
+            ("заёмщиков", ["banking_product_use"]),
             ("руководителей", ["job_title"]),
             ("сотрудников отдела закупок", ["department"]),
             ("родителей детей от 3 до 7 лет", ["children", "children_age"]),

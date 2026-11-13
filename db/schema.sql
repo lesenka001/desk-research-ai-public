@@ -97,6 +97,12 @@ ALTER TABLE findings ADD COLUMN IF NOT EXISTS behavior_period TEXT;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS is_derived BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS targeting_criteria JSONB;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS candidate_criteria JSONB;
+-- Nullable fields distinguish unmarked legacy findings from explicit exclusions.
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS population_scope TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS is_primary BOOLEAN;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS primary_rank INTEGER;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS primary_reason TEXT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS is_demographic_breakdown BOOLEAN;
 
 CREATE UNIQUE INDEX IF NOT EXISTS materials_content_hash_unique
     ON materials (content_hash) WHERE content_hash IS NOT NULL;
@@ -104,6 +110,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS findings_material_prompt_position_unique
     ON findings (material_id, prompt_version, finding_index);
 CREATE INDEX IF NOT EXISTS findings_material_prompt_block_position_idx
     ON findings (material_id, prompt_version, block_index, block_position);
+CREATE INDEX IF NOT EXISTS findings_primary_publication_idx
+    ON findings (material_id, prompt_version, primary_rank, finding_index, id)
+    WHERE coalesce(is_primary, TRUE) AND NOT coalesce(is_demographic_breakdown, FALSE);
 
 -- the bot marks a finding when it has been sent to subscribers
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;

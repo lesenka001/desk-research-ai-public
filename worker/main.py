@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import db
-from worker.policy import population_scope
+from worker.policy import population_scope, select_primary_findings
 
 SERVICE = "worker"
 OPENWEBUI_BASE_URL = os.environ.get(
@@ -18,14 +18,14 @@ OPENWEBUI_BASE_URL = os.environ.get(
 ).rstrip("/")
 OPENWEBUI_URL = f"{OPENWEBUI_BASE_URL}/api/chat/completions"
 MODEL = os.environ.get("MODEL", "")
-DEFAULT_PROMPT_VERSION = "audience-targetable-bases-v6"
+DEFAULT_PROMPT_VERSION = "audience-primary-findings-v7"
 PROMPT_VERSION = os.environ.get("PROMPT_VERSION", DEFAULT_PROMPT_VERSION)
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "10"))
 RETRY_SECONDS = int(os.environ.get("RETRY_SECONDS", "3600"))
 MAX_TEXT_CHARS = int(os.environ.get("MAX_TEXT_CHARS", "12000"))
 MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "10000"))
 WORKER_BATCH_SIZE = int(os.environ.get("WORKER_BATCH_SIZE", "20"))
-MAX_FINDINGS_PER_MATERIAL = int(os.environ.get("MAX_FINDINGS_PER_MATERIAL", "20"))
+MAX_FINDINGS_PER_MATERIAL = max(1, min(30, int(os.environ.get("MAX_FINDINGS_PER_MATERIAL", "30"))))
 REPROCESS_OLD = os.environ.get("REPROCESS_OLD", "0").lower() in {"1", "true", "yes"}
 TARGETING_CRITERIA_PATH = Path(__file__).with_name("targeting_criteria.json")
 
@@ -103,6 +103,10 @@ RESTRICTED_AUDIENCE_MARKERS = (
     "пользовател",
     "покупател",
     "клиент",
+    "держател",
+    "вкладчик",
+    "заемщик",
+    "заёмщик",
     "владельц",
     "продавц",
     "сотрудник",
@@ -149,6 +153,10 @@ HUMAN_AUDIENCE_MARKERS = (
     "пользовател",
     "покупател",
     "клиент",
+    "держател",
+    "вкладчик",
+    "заемщик",
+    "заёмщик",
     "владельц",
     "продавц",
     "сотрудник",
@@ -185,6 +193,10 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
       "topic": "короткая тема исследования",
       "indicator_type": "population_share | conditional_share",
       "population_scope": "base | conditional | unknown",
+      "is_primary": true или false,
+      "primary_rank": "приоритет основной от 1 до 5 или null",
+      "primary_reason": "почему находка основная или почему не выбрана, или null",
+      "is_demographic_breakdown": true или false,
       "ir_applicability": "direct | indirect",
       "geography": "география исследования или null",
       "audience": "аудитория, к которой относится показатель, или null",
@@ -209,6 +221,9 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
 - Знаменателем всегда должны быть люди: население, респонденты, пользователи, покупатели, родители, сотрудники, руководители, представители компаний или другая явно названная группа людей. B2B-аудитории допустимы.
 - Не извлекай абсолютные количества, объем или долю рынка, долю заказов/продаж/выручки/трафика, средний чек, цены, темпы изменения и прогнозы рыночных или операционных показателей. Процент, знаменателем которого являются не люди, не является находкой.
 - Один материал может дать от 0 до {max_findings} находок. Не дублируй один показатель разными формулировками.
+- Сохрани ВСЕ проверяемые находки в пределах этого лимита. Отдельно выбери от 0 до 5 основных на ВЕСЬ материал: главные смысловые показатели, а не каждое уточнение или самый большой процент. Не добивай количество до пяти. is_primary=true требует краткого primary_reason и уникального primary_rank от 1 до 5; у остальных primary_rank=null.
+- При наличии пригодных базовых показателей основные выбирай из них, обычно от генпопа. Если базовых нет, выбери основные условные. unknown не может быть основной. Тип базы и основная/остальная — разные признаки.
+- is_demographic_breakdown=true только для состава выборки по возрасту/географии (например, доля респондентов в возрасте 18–30 лет), такие находки сохраняй, но не делай основными. Поведение определенной возрастной или географической группы (например, доля покупавших среди людей 18–30 лет) не является составом выборки и может быть основной. Объясняй выбор основных главной темой и информативностью, не численным размером процента.
 - Сначала раздели находки одной страницы на смысловые блоки. В каждом блоке первая находка — базовая доля, остальные — уточнения внутри аудитории предыдущей находки.
 - finding_key уникален внутри материала. parent_key указывает на непосредственную родительскую находку того же блока. У базовой находки parent_key=null.
 - block_index начинается с 1. Для разных базовых измерений, например «покупали» и «продавали», используй разные блоки.
@@ -247,6 +262,10 @@ FINDING_JSON_SCHEMA = {
         "parent_key": {"type": ["string", "null"]},
         "indicator_type": {"type": "string", "enum": sorted(INDICATOR_TYPES)},
         "population_scope": {"type": "string", "enum": ["base", "conditional", "unknown"]},
+        "is_primary": {"type": "boolean"},
+        "primary_rank": {"type": ["integer", "null"]},
+        "primary_reason": {"type": ["string", "null"]},
+        "is_demographic_breakdown": {"type": "boolean"},
         "ir_applicability": {
             "type": "string",
             "enum": sorted(IR_APPLICABILITY_VALUES),
@@ -280,6 +299,10 @@ FINDING_JSON_SCHEMA = {
         "parent_key",
         "indicator_type",
         "population_scope",
+        "is_primary",
+        "primary_rank",
+        "primary_reason",
+        "is_demographic_breakdown",
         "ir_applicability",
         "geography",
         "audience",
@@ -346,6 +369,10 @@ def safe_excerpt(value, limit=800):
 
 
 def require_model_config():
+    if PROMPT_VERSION in {"audience-human-shares-v5", "audience-targetable-bases-v6"}:
+        raise RuntimeError(
+            f"PROMPT_VERSION устарел для правил 30/5; задайте {DEFAULT_PROMPT_VERSION}"
+        )
     if not os.environ.get("OPENWEBUI_API_KEY"):
         raise RuntimeError("OPENWEBUI_API_KEY не задан")
     if not MODEL:
@@ -807,6 +834,10 @@ def validate_answer(answer, text):
                 "useful_for": nullable_text(raw.get("useful_for"), 700),
                 "evidence": evidence,
                 "summary": summary,
+                "is_primary": raw.get("is_primary") is True and type(raw.get("is_demographic_breakdown")) is bool,
+                "primary_rank": raw.get("primary_rank") if type(raw.get("primary_rank")) is int else None,
+                "primary_reason": nullable_text(raw.get("primary_reason"), 700) if isinstance(raw.get("primary_reason"), str) else None,
+                "is_demographic_breakdown": raw.get("is_demographic_breakdown") is True,
             }
         finding["population_scope"] = population_scope(
             {**finding, "population_scope": raw.get("population_scope")}, text, set(criteria)
@@ -819,7 +850,7 @@ def validate_answer(answer, text):
             finding["base_kind"] = "targetable_explicit"
         valid.append(finding)
         known_keys[finding_key] = finding
-    return valid
+    return select_primary_findings(valid)
 
 
 def pending_materials(conn):
@@ -846,6 +877,7 @@ def pending_materials(conn):
 
 
 def save_result(conn, material_id, findings):
+    findings = select_primary_findings(findings[:min(30, MAX_FINDINGS_PER_MATERIAL)])
     status = "done" if findings else "skipped"
     with conn.transaction():
         # Prompt upgrades add a new version. Older interpretations stay in the
@@ -859,11 +891,12 @@ def save_result(conn, material_id, findings):
                         useful_for, evidence, summary, source_value, source_percent_base,
                         calculated_percent, calculation_formula, calculation_chain, base_kind,
                         base_reason, methodology_evidence, is_derived, targeting_criteria,
-                        candidate_criteria, model, prompt_version)
+                        candidate_criteria, model, prompt_version, population_scope,
+                        is_primary, primary_rank, primary_reason, is_demographic_breakdown)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                            %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s::jsonb,
-                           %s::jsonb, %s, %s)
+                           %s::jsonb, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (material_id, prompt_version, finding_index) DO NOTHING""",
                 (
                     material_id,
@@ -900,6 +933,11 @@ def save_result(conn, material_id, findings):
                     json.dumps(finding["candidate_criteria"], ensure_ascii=False),
                     MODEL,
                     PROMPT_VERSION,
+                    finding["population_scope"],
+                    finding["is_primary"],
+                    finding["primary_rank"],
+                    finding["primary_reason"],
+                    finding["is_demographic_breakdown"],
                 ),
             )
         conn.execute(

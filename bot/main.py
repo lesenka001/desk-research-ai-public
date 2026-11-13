@@ -30,15 +30,31 @@ TELEGRAM_DIGEST_LIMIT = 3800
 # without that pointer use only their newest stored version, never a mixture of
 # interpretations. The type/value/base checks hide old market and absolute
 # metrics without deleting audit rows.
-CURRENT_AUDIENCE_FINDING_SQL = (
+AUDIENCE_ROW_SQL = (
     "f.indicator_type IN ('population_share', 'conditional_share')"
     " AND f.value ~ ('^[[:space:]]*[0-9]+([.,][0-9]+)?[[:space:]]*'"
     " || chr(37) || '[[:space:]]*$')"
     " AND coalesce(nullif(btrim(f.percent_base), ''), nullif(btrim(f.audience), '')) IS NOT NULL"
-    " AND f.prompt_version = coalesce(m.processed_prompt_version,"
+)
+PRIMARY_ROW_SQL = (
+    "coalesce(f.is_primary, TRUE)"
+    " AND NOT coalesce(f.is_demographic_breakdown, FALSE)"
+    " AND (f.is_primary IS NULL OR (f.population_scope IN ('base', 'conditional')"
+    " AND nullif(btrim(f.primary_reason), '') IS NOT NULL))"
+)
+CURRENT_AUDIENCE_FINDING_SQL = (
+    AUDIENCE_ROW_SQL
+    + " AND f.prompt_version = coalesce(m.processed_prompt_version,"
     " (SELECT latest_f.prompt_version FROM findings latest_f"
     " WHERE latest_f.material_id = m.id"
     " ORDER BY latest_f.created_at DESC, latest_f.id DESC LIMIT 1))"
+    " AND " + PRIMARY_ROW_SQL
+    + " AND f.id IN (SELECT visible_f.id FROM findings visible_f"
+    " WHERE visible_f.material_id = f.material_id"
+    " AND visible_f.prompt_version = f.prompt_version AND "
+    + AUDIENCE_ROW_SQL.replace("f.", "visible_f.")
+    + " AND " + PRIMARY_ROW_SQL.replace("f.", "visible_f.")
+    + " ORDER BY visible_f.primary_rank NULLS LAST, visible_f.finding_index, visible_f.id LIMIT 5)"
 )
 
 COMMANDS = [
@@ -130,6 +146,7 @@ def digest_finding_sort_key(finding):
 
 def build_digest(rows, source_counts=None, limit=TELEGRAM_DIGEST_LIMIT):
     """Build a Telegram digest without splitting a semantic finding block."""
+    rows = public_findings(rows)
     source_counts = source_counts or []
     heading = f"<b>Новых статистических находок: {len(rows)}</b>"
     if source_counts:
@@ -190,6 +207,27 @@ def build_digest(rows, source_counts=None, limit=TELEGRAM_DIGEST_LIMIT):
         if len(text) + len(footer) <= limit:
             text += footer
     return text, included_ids
+
+
+def public_findings(rows):
+    """Defensive per-material cap for renderers; SQL applies the same policy."""
+    counts = {}
+    visible = []
+    for row in rows:
+        material_id = row["material_id"]
+        if row.get("is_primary") is False or row.get("is_demographic_breakdown") is True:
+            continue
+        if row.get("is_primary") is not None and (
+            row.get("is_primary") is not True
+            or row.get("population_scope") not in {"base", "conditional"}
+            or not str(row.get("primary_reason") or "").strip()
+        ):
+            continue
+        if counts.get(material_id, 0) >= 5:
+            continue
+        visible.append(row)
+        counts[material_id] = counts.get(material_id, 0) + 1
+    return visible
 
 
 def setup(conn):
@@ -404,7 +442,7 @@ def group_findings(findings):
     """Group a flat feed by source page and source order."""
     materials = {}
     for finding in sorted(
-        findings,
+        public_findings(findings),
         key=lambda item: (
             item.get("material_id") or 0,
             item.get("block_index") or 1,
@@ -483,6 +521,11 @@ def page_data(conn):
         "text",
         "sent_at",
         "model",
+        "population_scope",
+        "is_primary",
+        "primary_rank",
+        "primary_reason",
+        "is_demographic_breakdown",
     )
     findings = []
     for row in conn.execute(
@@ -493,7 +536,8 @@ def page_data(conn):
         " f.calculation_chain, f.base_kind, f.base_reason, f.methodology_evidence, f.is_derived,"
         " f.targeting_criteria, f.candidate_criteria,"
         " m.title, m.url, coalesce(m.published_at, m.collected_at), m.run_id,"
-        " s.id, s.name, s.url, left(m.text, 600), f.sent_at, f.model"
+        " s.id, s.name, s.url, left(m.text, 600), f.sent_at, f.model,"
+        " f.population_scope, f.is_primary, f.primary_rank, f.primary_reason, f.is_demographic_breakdown"
         " FROM findings f JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id"
         " WHERE " + CURRENT_AUDIENCE_FINDING_SQL
         + " ORDER BY coalesce(m.published_at, m.collected_at) DESC, m.id DESC,"

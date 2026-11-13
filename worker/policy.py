@@ -49,7 +49,7 @@ def population_scope(finding, text, approved_ids=None):
         return "conditional"
     if re.search(r"пользовател|клиент|использующ|пользующ", denominator):
         banking = "banking_product_use" in requested and re.search(
-            r"банков|карт|кредит|вклад|депозит|счет|ипотек", denominator
+            r"банк|карт|кредит|вклад|депозит|счет|ипотек|заемщик", denominator
         )
         if not banking:
             return "conditional"
@@ -75,10 +75,37 @@ def population_scope(finding, text, approved_ids=None):
         # when the legacy indicator type or base_kind describes a subgroup.
         if any(re.search(pattern, denominator) and requested.intersection(ids) for pattern, ids in requirements):
             return "base"
-        if "banking_product_use" in requested and re.search(r"банков|карт|кредит|вклад|счет|ипотек", denominator):
+        if "banking_product_use" in requested and re.search(r"банк|карт|кредит|вклад|счет|ипотек|заемщик", denominator):
             return "base"
     if not requested and finding.get("base_kind") in {"conditional", "unknown"}:
         return "conditional" if finding.get("base_kind") == "conditional" else "unknown"
     if re.search(r"населени|россиян|респондент|жител|граждан|опрошенн|мужчин|женщин|молодеж", denominator):
         return "base"
     return "unknown"
+
+
+def select_primary_findings(findings, limit=5):
+    """Keep every validated row, publishing only the model's eligible choices.
+
+The limit covers the whole material, not each block. Never promote unchosen
+rows to fill a quota, and never publish a pure sample composition statistic.
+"""
+    rows = [dict(row) for row in findings]
+    limit = max(0, min(5, int(limit)))
+    eligible = [i for i, row in enumerate(rows)
+                if row.get("is_demographic_breakdown") is not True
+                and row.get("population_scope") in {"base", "conditional"}]
+    preferred = "base" if any(rows[i].get("population_scope") == "base" for i in eligible) else "conditional"
+    choices = [i for i in eligible if rows[i].get("is_primary") is True
+               and rows[i].get("population_scope") == preferred
+               and isinstance(rows[i].get("primary_reason"), str)
+               and rows[i]["primary_reason"].strip()]
+    def ranking(index):
+        rank = rows[index].get("primary_rank")
+        return (rank if type(rank) is int and rank > 0 else 10**6, index)
+    chosen = sorted(choices, key=ranking)[:limit]
+    ranks = {index: rank for rank, index in enumerate(chosen, 1)}
+    for i, row in enumerate(rows):
+        row["is_primary"] = i in ranks
+        row["primary_rank"] = ranks.get(i)
+    return rows

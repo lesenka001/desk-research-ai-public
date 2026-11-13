@@ -386,7 +386,7 @@ class TargetingCriteriaTests(unittest.TestCase):
         compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
 
-        self.assertEqual(DEFAULT_PROMPT_VERSION, "audience-targetable-bases-v6")
+        self.assertEqual(DEFAULT_PROMPT_VERSION, "audience-primary-findings-v7")
         self.assertIn(f"PROMPT_VERSION={DEFAULT_PROMPT_VERSION}", env_example)
         self.assertIn(
             f"PROMPT_VERSION=${{PROMPT_VERSION:-{DEFAULT_PROMPT_VERSION}}}",
@@ -470,11 +470,11 @@ class TargetingCriteriaTests(unittest.TestCase):
 
 
 class FindingBlockExtractionTests(unittest.TestCase):
-    def test_prompt_renders_criteria_and_twenty_finding_limit(self):
+    def test_prompt_renders_criteria_and_thirty_finding_limit(self):
         body = model_request_body("НАФИ", "Тест", "Текст", None, "json_object")
         prompt = body["messages"][0]["content"]
         self.assertIn("geography: география", prompt)
-        self.assertIn("от 0 до 20 находок", prompt)
+        self.assertIn("от 0 до 30 находок", prompt)
         self.assertIn("знаменателем всегда должны быть люди", prompt.lower())
         self.assertNotIn("absolute_count", prompt)
         self.assertNotIn("market_metric", prompt)
@@ -703,6 +703,7 @@ class WorkerFailureTests(unittest.TestCase):
         self.assertIn("processing_error", sql)
         self.assertIn("status = 'failed'", sql)
         self.assertNotIn("INSERT INTO findings", sql)
+        self.assertNotIn("processed_prompt_version =", sql)
 
 
 if __name__ == "__main__":
