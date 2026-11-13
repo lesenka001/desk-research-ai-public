@@ -386,7 +386,7 @@ class TargetingCriteriaTests(unittest.TestCase):
         compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
 
-        self.assertEqual(DEFAULT_PROMPT_VERSION, "audience-human-shares-v5")
+        self.assertEqual(DEFAULT_PROMPT_VERSION, "audience-targetable-bases-v6")
         self.assertIn(f"PROMPT_VERSION={DEFAULT_PROMPT_VERSION}", env_example)
         self.assertIn(
             f"PROMPT_VERSION=${{PROMPT_VERSION:-{DEFAULT_PROMPT_VERSION}}}",

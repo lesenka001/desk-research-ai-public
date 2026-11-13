@@ -92,7 +92,7 @@ OPENWEBUI_API_KEY=...
 MODEL=qwen3.8-27b
 MAX_OUTPUT_TOKENS=10000
 MAX_FINDINGS_PER_MATERIAL=20
-PROMPT_VERSION=audience-human-shares-v5
+PROMPT_VERSION=audience-targetable-bases-v6
 ```
 
 Для Qwen worker отключает рассуждения через `chat_template_kwargs.enable_thinking=false` и ожидает ответ API до 240 секунд.
@@ -137,7 +137,7 @@ Telegram нужен публичный HTTPS-туннель и переменн�
 ## Повторная обработка
 
 Обычный перезапуск worker не обрабатывает материал повторно с той же версией
-промпта. Версия строгого отбора долей людей — `audience-human-shares-v5`.
+промпта. Версия строгого отбора долей людей — `audience-targetable-bases-v6`.
 
 ### Контрольный прогон в Coolify
 
@@ -153,7 +153,7 @@ psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT id, title, processed_promp
 В Environment Variables установите, подставив найденный id вместо `<ID>`:
 
 ```text
-PROMPT_VERSION=audience-human-shares-v5
+PROMPT_VERSION=audience-targetable-bases-v6
 REPROCESS_OLD=1
 REPROCESS_MATERIAL_IDS=<ID>,29,30
 MAX_FINDINGS_PER_MATERIAL=20
@@ -163,7 +163,7 @@ MAX_FINDINGS_PER_MATERIAL=20
 результат запросом:
 
 ```sh
-psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT m.id, m.title, f.block_index, f.block_position, f.value, f.percent_base, f.summary FROM findings f JOIN materials m ON m.id=f.material_id WHERE f.prompt_version='audience-human-shares-v5' AND m.id IN (<ID>,29,30) ORDER BY m.id, f.block_index, f.block_position;"
+psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT m.id, m.title, f.block_index, f.block_position, f.value, f.percent_base, f.summary FROM findings f JOIN materials m ON m.id=f.material_id WHERE f.prompt_version='audience-targetable-bases-v6' AND m.id IN (<ID>,29,30) ORDER BY m.id, f.block_index, f.block_position;"
 ```
 
 Ожидаемый результат:

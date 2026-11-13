@@ -10,6 +10,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import db
+from worker.policy import population_scope
 
 SERVICE = "worker"
 OPENWEBUI_BASE_URL = os.environ.get(
@@ -17,7 +18,7 @@ OPENWEBUI_BASE_URL = os.environ.get(
 ).rstrip("/")
 OPENWEBUI_URL = f"{OPENWEBUI_BASE_URL}/api/chat/completions"
 MODEL = os.environ.get("MODEL", "")
-DEFAULT_PROMPT_VERSION = "audience-human-shares-v5"
+DEFAULT_PROMPT_VERSION = "audience-targetable-bases-v6"
 PROMPT_VERSION = os.environ.get("PROMPT_VERSION", DEFAULT_PROMPT_VERSION)
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "10"))
 RETRY_SECONDS = int(os.environ.get("RETRY_SECONDS", "3600"))
@@ -137,6 +138,7 @@ HUMAN_AUDIENCE_MARKERS = (
     "детей",
     "подрост",
     "молодеж",
+    "молодёж",
     "пенсионер",
     "родител",
     "матер",
@@ -182,6 +184,7 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
       "parent_key": "finding_key непосредственной родительской находки или null",
       "topic": "короткая тема исследования",
       "indicator_type": "population_share | conditional_share",
+      "population_scope": "base | conditional | unknown",
       "ir_applicability": "direct | indirect",
       "geography": "география исследования или null",
       "audience": "аудитория, к которой относится показатель, или null",
@@ -212,6 +215,8 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
 - Базовую находку каждого блока ставь раньше дочерних. Не связывай показатели, если вложенность знаменателей неоднозначна.
 - population_share — только доля от всего населения либо широкой демографической базы, заданной лишь географией, полом или возрастом.
 - conditional_share — любая доля внутри группы, уже отобранной по поведению, пользованию, покупке, владению, профессии, заболеванию или характеристике организации. Доли среди пользователей, покупателей, продавцов, клиентов, владельцев и работников всегда conditional_share, даже если они составляют всю выборку исследования.
+- population_scope независимо от indicator_type обозначает таргетируемость базы: base — генпоп или группа, ВСЕ ограничения которой перечислены в утвержденных таргетируемых критериях; conditional — есть хотя бы одно нетаргетируемое ограничение; unknown — база или её определение неизвестны. Пользователи банковских продуктов, родители с детьми определенного возраста, сотрудники указанной отрасли/должности/отдела и размера бизнеса могут иметь base, хотя indicator_type у них conditional_share.
+- «Молодежь» без определенных возрастных границ — unknown, а «молодежь (18–30 лет)» — base. Не подставляй возраст всей выборки вместо границ отдельной группы. При составной базе проверь каждое ограничение; неизвестный критерий не делает базу таргетируемой.
 - ir_applicability=direct, только если показатель непосредственно является долей людей с нужным признаком относительно ясно указанной базы.
 - ir_applicability=indirect для отношения, намерения, частоты или связанного признака, который лишь помогает косвенно оценить ЦА.
 - Не вычисляй вложенные доли и не объединяй разные показатели: извлекай исходные значения и точные связи parent_key. Разрешено только перевести простую словесную долю в процент по правилу ниже.
@@ -221,11 +226,12 @@ PROMPT = """Ты отбираешь проверяемые статистиче�
 - Географию, аудиторию, период и базу указывай только если они явно следуют из текста. Иначе null.
 - targetable_explicit используй, когда база прямо названа и состоит только из утвержденных таргетируемых критериев.
 - targetable_inferred используй только при обоснованном выводе из описания выборки/методологии. Тогда обязательны base_reason и дословная methodology_evidence.
-- conditional используй для доли внутри поведенческой или иной нетаргетируемой группы. unknown — если база неясна.
+- conditional используй для базы с нетаргетируемым ограничением, а не для любой поведенческой группы: банковские продукты и утвержденные B2B-критерии таргетируемы. unknown — если база неясна.
 - В targeting_criteria перечисли id всех критериев, образующих базу. Новый возможный критерий дай коротким английским id: программа сохранит его кандидатом, но не одобрит автоматически.
 - behavior_period обязателен, когда в тексте указаны период, срок или частота покупки, продажи или пользования. Не заменяй им study_period исследования.
 - value обязано быть процентом от 0% до 100%. Для простых словесных долей «половина», «треть», «две трети», «четверть», «три четверти» переводи значение соответственно в 50%, около 33%, около 67%, 25%, 75%. Округлённую долю отмечай словом «около» в summary, например «две трети респондентов» → «около 67% респондентов». evidence должна дословно сохранять исходное словесное выражение или численный процент и подтверждать человеческую аудиторию. Не выводи численный процент из других, не перечисленных здесь словесных форм. Если проверяемой доли людей нет, не создавай находку.
 - Дата публикации не является периодом исследования.
+- Дата проведения опроса не является периодом поведения: не добавляй «в августе 2026 года» в summary только по дате опроса. Сохраняй значимые названия и уточнения в скобках из источника. «Чаще других» без проверяемой доли не является отдельной находкой.
 - Если пригодной статистики нет, relevant=false и findings=[].
 """
 
@@ -240,6 +246,7 @@ FINDING_JSON_SCHEMA = {
         "block_title": {"type": ["string", "null"]},
         "parent_key": {"type": ["string", "null"]},
         "indicator_type": {"type": "string", "enum": sorted(INDICATOR_TYPES)},
+        "population_scope": {"type": "string", "enum": ["base", "conditional", "unknown"]},
         "ir_applicability": {
             "type": "string",
             "enum": sorted(IR_APPLICABILITY_VALUES),
@@ -272,6 +279,7 @@ FINDING_JSON_SCHEMA = {
         "block_title",
         "parent_key",
         "indicator_type",
+        "population_scope",
         "ir_applicability",
         "geography",
         "audience",
@@ -770,8 +778,6 @@ def validate_answer(answer, text):
         # mentions people elsewhere in the sentence is not enough.
         if indicator_type == "conditional_share" and not percent_base:
             continue
-        if indicator_type == "conditional_share":
-            base_kind = "conditional"
         ir_applicability = normalized_ir_applicability(
             raw.get("ir_applicability"), indicator_type, percent_base
         )
@@ -802,6 +808,15 @@ def validate_answer(answer, text):
                 "evidence": evidence,
                 "summary": summary,
             }
+        finding["population_scope"] = population_scope(
+            {**finding, "population_scope": raw.get("population_scope")}, text, set(criteria)
+        )
+        if finding["population_scope"] == "conditional":
+            finding["base_kind"] = "conditional"
+        elif finding["population_scope"] == "unknown":
+            finding["base_kind"] = "unknown"
+        elif finding["base_kind"] not in {"targetable_explicit", "targetable_inferred"}:
+            finding["base_kind"] = "targetable_explicit"
         valid.append(finding)
         known_keys[finding_key] = finding
     return valid
