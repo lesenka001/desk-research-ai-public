@@ -135,3 +135,23 @@ INSERT INTO sources (name, kind, url) VALUES
     ('Банк России: новое на сайте', 'cbr_rss', 'https://www.cbr.ru/rss/RssNews')
 ON CONFLICT (name) DO UPDATE
 SET kind = EXCLUDED.kind, url = EXCLUDED.url, active = TRUE;
+
+-- SPEC004: private CRM aggregate and append-only intake/decision history.
+-- Additive only: no public findings or earlier tables are rewritten.
+CREATE TABLE IF NOT EXISTS crm_dataset (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    revision    BIGINT NOT NULL DEFAULT 0,
+    data        JSONB NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO crm_dataset (id, data)
+VALUES (1, '{"projects": {}, "aliases": {}}'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS crm_history (
+    id          BIGSERIAL PRIMARY KEY,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    kind        TEXT NOT NULL CHECK (kind IN ('import', 'decision')),
+    filename    TEXT,
+    report      JSONB NOT NULL
+);
