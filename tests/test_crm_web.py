@@ -156,5 +156,25 @@ class HTTPTests(unittest.TestCase):
         self.assertIn('Прежняя ЦА',body)
         self.assertRegex(body,r'<option value="[a-f0-9]+">Прежняя ЦА</option>')
 
+    def test_browser_form_origin_policy_and_same_origin_login(self):
+        # Browsers send Origin:null for a POST form served with no-referrer.
+        # The policy must preserve Origin on a same-origin form submission.
+        status,headers,_=self.request()
+        self.assertEqual(status,200)
+        self.assertEqual(headers['Referrer-Policy'],'same-origin')
+        fields=urlencode({'password':'test-owner-passphrase'})
+        headers={'Content-Type':'application/x-www-form-urlencoded',
+                 'Origin':f'http://{self.host}'}
+        status,result,_=self.request('/crm/login','POST',fields,headers)
+        self.assertEqual(status,303)
+        self.assertIn('Set-Cookie',result)
+
+    def test_opaque_and_foreign_form_origins_still_rejected(self):
+        for origin in ('null','https://evil.test',f'http://{self.host}.evil.test'):
+            with self.subTest(origin=origin):
+                status,_,_=self.request('/crm/login','POST',urlencode({'password':'test-owner-passphrase'}),
+                                       {'Content-Type':'application/x-www-form-urlencoded','Origin':origin})
+                self.assertEqual(status,403)
+
 
 if __name__=='__main__': unittest.main()

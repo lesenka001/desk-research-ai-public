@@ -78,6 +78,18 @@ def hidden(token):
 
 
 def response(handler, body='', status=200, headers=()):
+    # Closing a socket with an unread POST body can reset the connection before
+    # the browser receives our 403/429. Drain only small, bounded rejected forms;
+    # never wait for a large unauthenticated upload just to return an error.
+    if handler.command == 'POST' and not getattr(handler, '_crm_body_read', False):
+        length = handler.headers.get('Content-Length', '')
+        if length.isdigit() and 0 < int(length) <= 16384:
+            handler.connection.settimeout(2)
+            try:
+                handler.rfile.read(int(length))
+            except OSError:
+                pass
+            handler._crm_body_read = True
     data = body.encode('utf-8')
     handler.send_response(status)
     for key, value in headers:
@@ -86,7 +98,11 @@ def response(handler, body='', status=200, headers=()):
     handler.send_header('Content-Length', str(len(data)))
     handler.send_header('Cache-Control', 'no-store')
     handler.send_header('X-Content-Type-Options', 'nosniff')
-    handler.send_header('Referrer-Policy', 'no-referrer')
+    # no-referrer turns Origin into "null" for browser POST form navigations,
+    # causing our same-origin check to reject even this application's own forms.
+    # same-origin preserves the origin for our forms without leaking referrers
+    # to other sites. Keep rejecting opaque/null and foreign origins below.
+    handler.send_header('Referrer-Policy', 'same-origin')
     handler.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
     handler.end_headers()
     handler.wfile.write(data)
@@ -302,6 +318,7 @@ def read_form(handler, upload=False):
         raise domain.IntakeError('Некорректный размер запроса или превышен лимит файла.')
     handler.connection.settimeout(15)
     body = handler.rfile.read(int(length))
+    handler._crm_body_read = True
     if len(body) != int(length): raise domain.IntakeError('Загрузка файла прервалась.')
     if not upload:
         return {key:values[0] for key,values in parse_qs(body.decode('utf-8'),max_num_fields=20).items()}
@@ -323,6 +340,7 @@ def routes(handler):
     parsed=urlsplit(handler.path)
     if parsed.path != '/crm' and not parsed.path.startswith('/crm/'):
         return False
+    handler._crm_body_read = False
     if not secret():
         response(handler,shell('<div class="notice error">Доступ владельца еще не настроен.</div>'),503)
         return True
