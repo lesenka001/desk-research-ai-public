@@ -72,9 +72,18 @@ class ImportTests(unittest.TestCase):
         state, report = import_rows(empty_state(), [row(), row()])
         self.assertEqual((report['added'], report['unchanged']), (1, 1))
 
-    def test_bad_update_does_not_replace_accepted_data(self):
+    def test_permanent_invalid_update_deactivates_old_pn_and_valid_import_restores_it(self):
+        for bad in (row(ir=0), row(n=None), row(audience=''), row(aorg='PN1')):
+            with self.subTest(bad=bad):
+                state, _ = import_rows(empty_state(), [row()])
+                state, _ = import_rows(state, [bad])
+                self.assertFalse(summaries(state))
+                state, _ = import_rows(state, [row()])
+                self.assertEqual(summaries(state)[0]['mean'], 20)
+
+    def test_conflicting_duplicates_do_not_deactivate_old_accepted_pn(self):
         state, _ = import_rows(empty_state(), [row()])
-        state, _ = import_rows(state, [row(ir=0)])
+        state, _ = import_rows(state, [row(ir=30), row(ir=40)])
         self.assertEqual(summaries(state)[0]['mean'], 20)
 
 

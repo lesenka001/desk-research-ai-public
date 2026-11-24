@@ -237,9 +237,9 @@ def import_rows(state, rows):
             if entry['reasons']:
                 entry['status'] = 'excluded'
                 report['excluded'] += 1
-                # Reject invalid updates without erasing a previously valid record;
-                # explicit recontact must be removed even if it was accepted before.
-                if record and 'recontact' in entry['reasons']:
+                # Permanent exclusions also deactivate an older accepted PN.
+                # A conflicting duplicate alone rejects this file's rows, not the old project.
+                if record and {'recontact', 'ir', 'n', 'audience', 'aorg'} & set(entry['reasons']):
                     record.update(excluded=True, accepted=None)
             elif index or (record and record['data'] == entry['data'] and not record.get('excluded')):
                 entry['status'] = 'unchanged'
@@ -285,7 +285,8 @@ def summaries(state):
     for record in state['projects'].values():
         if record.get('excluded'):
             continue
-        totals[record['data']['aorg']] += 1
+        counting = record['accepted']['data'] if record.get('pending') and record.get('accepted') else record['data']
+        totals[counting['aorg']] += 1
         if record.get('accepted'):
             accepted = record['accepted']
             groups[(accepted['data']['aorg'], accepted['group'])].append(accepted['data'])
