@@ -8,14 +8,15 @@ import db
 from crm import domain
 
 
-def load():
+def load(before=None):
     with db.connect() as conn:
         row = conn.execute('SELECT data, revision FROM crm_dataset WHERE id = 1').fetchone()
         if row is None:
             raise RuntimeError('CRM schema is not initialized')
         events = conn.execute(
             "SELECT id, created_at, kind, filename, report - 'rows' AS summary "
-            'FROM crm_history ORDER BY id DESC LIMIT 30'
+            'FROM crm_history WHERE (%s::bigint IS NULL OR id < %s) ORDER BY id DESC LIMIT 30',
+            (before, before),
         ).fetchall()
     return row[0], row[1], events
 

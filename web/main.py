@@ -5,6 +5,7 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import db
+from web.crm import routes as crm_routes
 from bot.main import CURRENT_AUDIENCE_FINDING_SQL
 
 SERVICE = "web"
@@ -35,6 +36,7 @@ PAGE = """<!doctype html>
 </style></head>
 <body><main>
 <h1>Навигатор достижимости ЦА</h1>
+<p><a href="/crm">База проектов · вход владельца</a></p>
 <div class="muted">Открытые исследования и статистика, потенциально полезные для оценки целевых аудиторий.</div>
 
 <div class="map">
@@ -157,6 +159,8 @@ def render(conn):
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if crm_routes(self):
+            return
         if self.path == "/health":
             # healthy only when the database answers too
             try:
@@ -185,6 +189,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         db.log(SERVICE, f"запрос {self.command} {self.path}")
+
+    def do_POST(self):
+        if not crm_routes(self):
+            self.send_error(404)
 
 
 def main():
