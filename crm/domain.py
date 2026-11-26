@@ -33,7 +33,7 @@ def identity(data):
     return sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def audience_key(text):
+def legacy_audience_key(text):
     text = str(text or '').casefold()
     def protect(match):
         value = re.sub(r'\s+', '', match.group()).replace('–', '-').replace('—', '-').replace(',', '.')
@@ -49,6 +49,55 @@ def audience_key(text):
             char = ' '
         result.append(char)
     return ' '.join(''.join(result).split())
+
+
+
+def audience_body(value):
+    value = unicodedata.normalize('NFKC', str(value or ''))
+    return value.split(':', 1)[-1].strip()
+
+
+def audience_key(value):
+    # Retain numeric boundaries/ranges and meaningful +/%/comparison signs.
+    # Whitespace and other punctuation outside those boundaries do not matter.
+    return re.sub(r'\s+', '', legacy_audience_key(audience_body(value)))
+
+
+def exact_audience_group(aliases, value):
+    # Old keys stay valid so prior manual choices and IQR group keys are preserved.
+    return aliases.get(legacy_audience_key(value))
+
+
+def resolve_audience_group(state, aorg, value):
+    aliases = state['aliases'].get(aorg, {})
+    exact = exact_audience_group(aliases, value)
+    if exact is not None:
+        return exact
+    key = audience_key(value)
+    if not key:
+        return None
+    candidates = {group for alias, group in aliases.items()
+                  if re.sub(r'\s+', '', alias) == key}
+    for group, meta in state.get('group_meta', {}).get(aorg, {}).items():
+        if any(audience_key(d) == key for d in meta.get('descriptions', [])):
+            candidates.add(group)
+    for wave in state.get('known_waves', {}).get(aorg, {}).values():
+        for description in wave['descriptions']:
+            if audience_key(description) == key:
+                mapped = exact_audience_group(aliases, description)
+                if mapped is not None:
+                    candidates.add(mapped)
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
+def unique_descriptions(descriptions):
+    seen, result = set(), []
+    for description in descriptions:
+        key = audience_key(description) or legacy_audience_key(description)
+        if key not in seen:
+            seen.add(key)
+            result.append(description)
+    return result
 
 
 def rounded(value):
@@ -157,7 +206,7 @@ def read_xlsx(content):
 
 
 def empty_state():
-    return dict(projects={}, aliases={}, known_waves={}, group_meta={}, metadata_version=5)
+    return dict(projects={}, aliases={}, known_waves={}, group_meta={}, metadata_version=5, audience_matching_version=2)
 
 
 
@@ -225,7 +274,7 @@ def ensure_metadata(state):
                 groups[key] = dict(number=number, name='', descriptions=[])
         for wave in state.get('known_waves', {}).get(aorg, {}).values():
             for description in wave['descriptions']:
-                key = aliases.get(audience_key(description))
+                key = resolve_audience_group(state, aorg, description)
                 if key in groups and description not in groups[key]['descriptions']:
                     groups[key]['descriptions'].append(description)
     return state
@@ -245,8 +294,8 @@ def project_info(state, aorg):
     return dict(total=total, project_type='трекер' if total > 1 else 'эдхок')
 
 
-def group_label(meta):
-    label = f'ЦА {meta["number"]}'
+def group_label(meta, pn=None):
+    label = pn or 'Нет PN в доступной истории'
     return label + (' — ' + meta['name'] if meta.get('name') else '')
 
 
@@ -274,7 +323,7 @@ def group_catalog(state):
         for key, meta in groups.items():
             members = []
             for pn, wave in state.get('known_waves', {}).get(aorg, {}).items():
-                if not any(aliases.get(audience_key(d)) == key for d in wave['descriptions']):
+                if not any(resolve_audience_group(state, aorg, d) == key for d in wave['descriptions']):
                     continue
                 record = state['projects'].get(pn)
                 status = 'Исключена / история'
@@ -290,9 +339,16 @@ def group_catalog(state):
                         status = 'История описания ЦА'
                 members.append(dict(pn=pn, status=status))
             members.sort(key=lambda r: pn_number(r['pn']))
-            item = dict(aorg=aorg, group=key, label=group_label(meta), meta=meta,
-                        descriptions=meta['descriptions'], members=members,
-                        summary=calculated.get((aorg, key)))
+            summary = calculated.get((aorg, key))
+            representative = summary['latest'] if summary else None
+            if representative is None and members:
+                waves = state['known_waves'][aorg]
+                representative = max((m['pn'] for m in members),
+                                     key=lambda pn: (waves[pn]['data'].get('date') or '', pn_number(pn)))
+            item = dict(aorg=aorg, group=key, label=group_label(meta, representative), meta=meta,
+                        representative=representative,
+                        descriptions=unique_descriptions(meta['descriptions']), members=members,
+                        summary=summary)
             item.update(project_info(state, aorg))
             result.append(item)
     return sorted(result, key=lambda g: (g['aorg'], g['meta']['number']))
@@ -314,6 +370,7 @@ def choice_key(data, group):
 
 def refresh(state):
     """Resolve known audiences, then flag candidates, preserving prior accepted replacements."""
+    ensure_metadata(state)
     records = state['projects']
     groups = defaultdict(list)
     for pn, record in sorted(records.items(), key=lambda item: (item[1]['data'].get('date') or '', pn_number(item[0]))):
@@ -327,7 +384,7 @@ def refresh(state):
         key = audience_key(data['audience'])
         if not aliases:
             aliases[key] = key
-        group = aliases.get(key)
+        group = resolve_audience_group(state, data['aorg'], data['audience'])
         record['group'] = group
         if group is None:
             record['pending'].append('audience')
@@ -357,6 +414,7 @@ def refresh(state):
         else:
             record['accepted'] = dict(data=deepcopy(record['data']), group=record['group'])
     ensure_metadata(state)
+    state['audience_matching_version'] = 2
     return state
 
 
@@ -408,10 +466,19 @@ def decide(state, pn, action, fingerprint, target=None):
     data = record['data']
     if action in ('same', 'different') and 'audience' in record.get('pending', []):
         aliases = state['aliases'][data['aorg']]
-        if action == 'same' and target not in set(aliases.values()):
+        available = set(aliases.values())
+        if action == 'same' and not target and len(available) == 1:
+            target = next(iter(available))
+        if action == 'same' and target not in available:
             raise IntakeError('Выбери существующую группу ЦА этого трекера.')
-        key = audience_key(data['audience'])
-        aliases[key] = target if action == 'same' else key
+        source = legacy_audience_key(data['audience'])
+        if action == 'same':
+            aliases[source] = target
+        else:
+            key = audience_key(data['audience'])
+            if key in set(aliases.values()):
+                key += '\x03' + identity([data['aorg'], source])[:12]
+            aliases[source] = key
     elif action in ('keep', 'exclude') and 'outlier' in record.get('pending', []):
         record['choice'] = dict(key=choice_key(data, record['group']), value=action)
     else:

@@ -36,7 +36,7 @@ class MemoryStore:
         before = deepcopy(self.state['group_meta'][aorg][group])
         self.state = domain.rename_group(self.state,aorg,group,name,fingerprint)
         after = self.state['group_meta'][aorg][group]
-        report = dict(action='rename_group',aorg=aorg,group=group,before=before,after=deepcopy(after),group_label=domain.group_label(after))
+        report = dict(action='rename_group',aorg=aorg,group=group,before=before,after=deepcopy(after),group_label=next(g['label'] for g in domain.group_catalog(self.state) if g['aorg']==aorg and g['group']==group))
         self.events.append((len(self.events)+1,datetime.now(timezone.utc),'decision',None,report))
         return len(self.events), report
     def history(self, event_id):
@@ -133,10 +133,10 @@ class HTTPTests(unittest.TestCase):
                           ['PN3','101','Нет N',20,0,datetime(2026,11,3)]])
         status,headers,_=self.upload(token,content)
         self.assertEqual(status,303)
-        self.assertEqual(headers['Location'],'/crm?event=1')
+        self.assertEqual(headers['Location'],'/crm?tab=review&notice=1&page=0#review-queue')
         status,_,body=self.request()
         self.assertEqual(status,200)
-        self.assertIn('Создать отдельную группу ЦА',body)
+        self.assertIn('Это другая ЦА',body)
         self.assertNotIn('<script>',body)
         self.assertIn('&lt;script&gt;',body)
         self.assertNotIn('PN3',body)
@@ -163,7 +163,8 @@ class HTTPTests(unittest.TestCase):
         status,_,body=self.request()
         self.assertEqual(status,200)
         self.assertIn('Прежняя ЦА',body)
-        self.assertRegex(body,r'<option value="[a-f0-9]+">ЦА 1</option>')
+        self.assertIn('<h3>PN1</h3>',body)
+        self.assertNotIn('name="target"',body)
 
     def test_browser_form_origin_policy_and_same_origin_login(self):
         # Browsers send Origin:null for a POST form served with no-referrer.
@@ -195,7 +196,7 @@ class HTTPTests(unittest.TestCase):
         self.memory.state=state
         _,_,body=self.request()
         self.assertIn('<option value="" selected disabled>',body)
-        self.assertIn('ЦА 2',body)
+        self.assertIn('<h3>PN2</h3>',body)
         self.assertIn('Всего волн проекта: 3',body)
         self.assertIn('трекер',body)
         self.assertIn('PN2',body)
@@ -207,7 +208,7 @@ class HTTPTests(unittest.TestCase):
         status,headers,_=self.post('/crm/decide',fields)
         self.assertEqual(status,303)
         result=self.request(headers['Location'])[2]
-        self.assertIn('PN3 · Отнесено к группе · ЦА 2',result)
+        self.assertIn('PN3 · Отнесено к группе · PN3',result)
         groups=domain.group_catalog(self.memory.state)
         self.assertEqual(groups[1]['summary']['mean'],30)
         self.assertEqual(groups[0]['summary']['count'],1)
@@ -226,12 +227,12 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(self.post('/crm/rename',fields)[0],400)
         self.memory.state,_=domain.import_rows(self.memory.state,[row()])
         body=self.request('/crm?tab=projects')[2]
-        self.assertIn('ЦА 1 — &lt;script&gt;Покупатели&lt;/script&gt;',body)
+        self.assertIn('PN1 — &lt;script&gt;Покупатели&lt;/script&gt;',body)
         self.assertNotIn('<script>',body)
         g=domain.group_catalog(self.memory.state)[0]
         fields.update(fingerprint=domain.identity(g['meta']),name='')
         self.assertEqual(self.post('/crm/rename',fields)[0],303)
-        self.assertEqual(domain.group_catalog(self.memory.state)[0]['label'],'ЦА 1')
+        self.assertEqual(domain.group_catalog(self.memory.state)[0]['label'],'PN1')
 
     def test_project_without_ir_and_filter_keeps_type(self):
         token=self.login()
@@ -241,7 +242,7 @@ class HTTPTests(unittest.TestCase):
         self.assertIn('Всего волн проекта: 2',body)
         self.memory.state,_=domain.import_rows(self.memory.state,[row(ir=0)])
         body=self.request('/crm?tab=projects')[2]
-        self.assertIn('ЦА 1',body)
+        self.assertIn('<h3>PN2</h3>',body)
         self.assertIn('Нет расчетных волн',body)
         self.assertIn('аорг 200',body)
         self.assertIn('Изменить название ЦА',body)
@@ -255,5 +256,63 @@ class HTTPTests(unittest.TestCase):
         self.assertIn('Ограничение истории проектов',body)
         self.assertIn('PN3: разные аорг в истории',body)
         self.assertIn('Неподтвержденные исторические связи не учтены',body)
+
+
+    def test_single_group_needs_no_dropdown_and_stays_in_review(self):
+        token=self.login()
+        self.memory.state,_=domain.import_rows(domain.empty_state(),[row(),row(2,audience='Женщины')])
+        body=self.request()[2]
+        self.assertIn('Это та же ЦА',body)
+        self.assertIn('Это другая ЦА',body)
+        self.assertNotIn('name="target"',body)
+        record=self.memory.state['projects']['PN2']
+        fields=dict(csrf=crm.csrf(token),pn='PN2',action='same',fingerprint=domain.identity(record['data']))
+        status,headers,_=self.post('/crm/decide',fields)
+        self.assertEqual(status,303)
+        self.assertIn('tab=review',headers['Location'])
+        self.assertNotIn('event=',headers['Location'])
+        body=self.request(headers['Location'])[2]
+        self.assertIn('role="status"',body)
+        self.assertIn('Спорных строк нет',body)
+        self.assertIn('class="active" href="/crm?tab=review"',body)
+
+    def test_review_page_is_preserved_and_clamped_after_last_card(self):
+        token=self.login()
+        self.memory.state,_=domain.import_rows(domain.empty_state(),[row()]+[row(i,audience=f'Покупатели товара {i}') for i in range(2,34)])
+        for pn in ('PN32','PN33'):
+            record=self.memory.state['projects'][pn]
+            fields=dict(csrf=crm.csrf(token),pn=pn,action='same',page='1',fingerprint=domain.identity(record['data']))
+            status,headers,_=self.post('/crm/decide',fields)
+            self.assertEqual(status,303)
+            self.assertIn('page=1',headers['Location'])
+            body=self.request(headers['Location'])[2]
+            self.assertIn('Это та же ЦА',body)
+        # Only page zero remains; requesting page one still shows the remaining queue.
+        self.assertIn('PN2 · аорг',body)
+
+    def test_adhoc_has_pn_heading_one_description_and_no_related_pn(self):
+        self.login()
+        self.memory.state,_=domain.import_rows(domain.empty_state(),[row(audience='Опция: Мужчины, женщины')])
+        body=self.request('/crm?tab=projects')[2]
+        self.assertIn('<h3>PN1</h3>',body)
+        self.assertNotIn('Связанные PN',body)
+        self.assertNotIn('ЦА 1',body)
+        self.assertEqual(body.count('Опция: Мужчины, женщины'),1)
+        self.assertEqual(body.count('>PN1<'),1)
+
+    def test_rename_preserves_project_search_and_does_not_open_history(self):
+        token=self.login()
+        self.memory.state,_=domain.import_rows(domain.empty_state(),[row()])
+        group=domain.group_catalog(self.memory.state)[0]
+        fields=dict(csrf=crm.csrf(token),aorg='100',group=group['group'].encode().hex(),
+                    name='Название',fingerprint=domain.identity(group['meta']),return_tab='projects',q='PN1',page='2')
+        status,headers,_=self.post('/crm/rename',fields)
+        self.assertEqual(status,303)
+        self.assertIn('tab=projects',headers['Location'])
+        self.assertIn('q=PN1',headers['Location'])
+        self.assertNotIn('event=',headers['Location'])
+        body=self.request(headers['Location'])[2]
+        self.assertIn('<h3>PN1 — Название</h3>',body)
+        self.assertIn('class="active" href="/crm?tab=projects"',body)
 
 if __name__=='__main__': unittest.main()

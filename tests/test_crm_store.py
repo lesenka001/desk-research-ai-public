@@ -123,7 +123,7 @@ class MetadataStoreTests(unittest.TestCase):
             original = deepcopy(state['projects'])
             store.rename('100', group['group'], 'Покупатели', domain.identity(group['meta']))
             loaded, _, _ = store.load()
-        self.assertEqual(domain.group_catalog(loaded)[0]['label'], 'ЦА 1 — Покупатели')
+        self.assertEqual(domain.group_catalog(loaded)[0]['label'], 'PN1 — Покупатели')
         self.assertEqual(loaded['projects'], original)
         report = conn.events[-1][2].obj
         self.assertEqual((report['before']['name'], report['after']['name']), ('', 'Покупатели'))
@@ -141,5 +141,31 @@ class MetadataStoreTests(unittest.TestCase):
             store.upload(b'file', 'file.xlsx')
         self.assertEqual(domain.project_info(conn.state, '100')['total'], 3)
         self.assertEqual(len(conn.events), 2)
+
+
+class AudienceMatchingUpgradeTests(unittest.TestCase):
+    def test_current_snapshot_refreshes_existing_pending_once_without_full_history(self):
+        conn=Connection()
+        conn.state,_=domain.import_rows(conn.state,[row(),row(2,audience='Женщины')])
+        conn.state['projects']['PN2']['data']['audience']='Опция 2: Мужчины18-45лет'
+        conn.state.pop('audience_matching_version')
+        with patch.object(store.db,'connect',return_value=conn):
+            state,_,_=store.load()
+            store.load()
+        self.assertFalse(state['projects']['PN2']['pending'])
+        self.assertEqual(domain.summaries(state)[0]['count'],2)
+        self.assertEqual(len(conn.events),1)
+        self.assertEqual(conn.events[0][2].obj['resolved'],['PN2'])
+        self.assertFalse(any(q.startswith('SELECT report') for q in conn.queries))
+
+    def test_matching_upgrade_audit_failure_rolls_back_current_snapshot(self):
+        conn=Connection()
+        conn.state,_=domain.import_rows(conn.state,[row()])
+        conn.state.pop('audience_matching_version')
+        before=deepcopy(conn.state)
+        conn.fail_history=True
+        with patch.object(store.db,'connect',return_value=conn):
+            with self.assertRaises(RuntimeError): store.load()
+        self.assertEqual(conn.state,before)
 
 if __name__ == '__main__': unittest.main()

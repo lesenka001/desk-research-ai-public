@@ -192,13 +192,13 @@ class ProjectMetadataTests(unittest.TestCase):
         state, _ = import_rows(state, [row(3, audience='Другая ЦА')])
         state = decide(state, 'PN3', 'different', identity(state['projects']['PN3']['data']))
         groups = group_catalog(state)
-        self.assertEqual([g['label'] for g in groups], ['ЦА 1 — Покупатели', 'ЦА 2'])
+        self.assertEqual([g['label'] for g in groups], ['PN1 — Покупатели', 'PN3'])
         self.assertEqual(summaries(state)[0]['mean'], 20)
         with self.assertRaises(IntakeError):
             rename_group(state, '100', g['group'], 'stale', identity(g['meta']))
         first = groups[0]
         state = rename_group(state, '100', first['group'], '', identity(first['meta']))
-        self.assertEqual(group_catalog(state)[0]['label'], 'ЦА 1')
+        self.assertEqual(group_catalog(state)[0]['label'], 'PN1')
 
     def test_groups_without_ir_keep_descriptions_and_pn(self):
         from crm.domain import group_catalog
@@ -280,6 +280,98 @@ class MetadataReviewRegressions(unittest.TestCase):
         old=next(g for g in group_catalog(state) if g['aorg']=='100')
         self.assertEqual(old['summary']['count'],1)
         self.assertEqual(old['members'][0]['status'],'В расчете (прежние данные)')
+
+
+class AudienceReviewHotfixTests(unittest.TestCase):
+    def test_prefix_punctuation_and_spacing_are_ignored(self):
+        for a,b in [
+            ('Опция 1: Мужчины,женщины 18–45 лет.', 'мужчины женщины 18 - 45 лет'),
+            ('Вариант Б:  Мужчины\t18–45 лет', 'Мужчины18-45лет'),
+            ('Опция：Покупатели молока', 'Покупатели-молока'),
+            ('Вариант: 1,5 года', '1.5года')]:
+            with self.subTest(a=a): self.assertEqual(audience_key(a),audience_key(b))
+        for a,b in [('18-45','1845'),('18 45','1845'),('100+','100'),('не курят','курят')]:
+            self.assertNotEqual(audience_key(a),audience_key(b))
+
+    def test_equivalent_option_texts_are_automatic_and_displayed_once(self):
+        from crm.domain import group_catalog
+        state,_=import_rows(empty_state(),[
+            row(audience='Опция 1: Мужчины,женщины 18–45 лет'),
+            row(2,audience='Опция 2: мужчины женщины18-45лет',ir=40)])
+        self.assertFalse(state['projects']['PN2']['pending'])
+        self.assertEqual(summaries(state)[0]['mean'],30)
+        group=group_catalog(state)[0]
+        self.assertEqual(len(group['descriptions']),1)
+        self.assertEqual(group['label'],'PN2')
+
+    def test_single_group_defaults_but_multiple_groups_require_choice(self):
+        state,_=import_rows(empty_state(),[row(),row(2,audience='Женщины')])
+        fingerprint=identity(state['projects']['PN2']['data'])
+        same=decide(state,'PN2','same',fingerprint)
+        self.assertEqual(summaries(same)[0]['count'],2)
+        separate=decide(state,'PN2','different',fingerprint)
+        separate,_=import_rows(separate,[row(3,audience='Покупатели')])
+        with self.assertRaises(IntakeError):
+            decide(separate,'PN3','same',identity(separate['projects']['PN3']['data']))
+
+    def test_legacy_keys_are_preserved_and_pending_equivalent_is_resolved(self):
+        from crm.domain import legacy_audience_key,refresh,group_catalog
+        state,_=import_rows(empty_state(),[row(audience='Опция 1: Мужчины'),row(2,audience='Женщины')])
+        old=legacy_audience_key('Опция 1: Мужчины')
+        current=state['projects']['PN1']['group']
+        state['aliases']['100']={old:old}
+        state['group_meta']['100']={old:dict(number=1,name='Название',descriptions=['Опция 1: Мужчины'])}
+        first=state['projects']['PN1']
+        first['group']=old; first['accepted']['group']=old
+        second=state['projects']['PN2']
+        second['data']['audience']='Опция 2: мужчины'
+        second['group']=None; second['accepted']=None; second['pending']=['audience']
+        before=deepcopy(first['accepted'])
+        refresh(state)
+        self.assertEqual(first['accepted'],before)
+        self.assertEqual(second['group'],old)
+        self.assertFalse(second['pending'])
+        self.assertEqual(group_catalog(state)[0]['label'],'PN2 — Название')
+        self.assertEqual(state['aliases']['100'],{old:old})
+
+    def test_existing_manual_separation_is_preserved_and_ambiguity_reviewed(self):
+        from crm.domain import legacy_audience_key,refresh
+        state,_=import_rows(empty_state(),[row(audience='A'),row(2,audience='B')])
+        state=decide(state,'PN2','different',identity(state['projects']['PN2']['data']))
+        aliases={}
+        for pn,label in [('PN1','Опция 1: Мужчины'),('PN2','Опция 2: Мужчины')]:
+            r=state['projects'][pn]; r['data']['audience']=label
+            r['accepted']['data']['audience']=label
+            aliases[legacy_audience_key(label)]=r['group']
+        state['aliases']['100']=aliases
+        refresh(state)
+        self.assertEqual(len(summaries(state)),2)
+        state,_=import_rows(state,[row(3,audience='Опция 3: Мужчины')])
+        self.assertIn('audience',state['projects']['PN3']['pending'])
+
+
+    def test_legacy_canonical_collision_needs_review_and_manual_choice_preserves_groups(self):
+        from crm.domain import legacy_audience_key,refresh
+        state,_=import_rows(empty_state(),[row(audience='Мужчины'),row(2,audience='Женщины')])
+        state=decide(state,'PN2','different',identity(state['projects']['PN2']['data']))
+        first=state['projects']['PN1']['group']; second=state['projects']['PN2']['group']
+        r=state['projects']['PN2']
+        r['data']['audience']='Опция 2: Мужчины'; r['accepted']['data']['audience']='Опция 2: Мужчины'
+        state['aliases']['100']={legacy_audience_key('Мужчины'):first,legacy_audience_key('Опция 2: Мужчины'):second}
+        refresh(state)
+        state,_=import_rows(state,[row(3,audience='Опция 3: Мужчины')])
+        self.assertIn('audience',state['projects']['PN3']['pending'])
+        fingerprint=identity(state['projects']['PN3']['data'])
+        joined=decide(state,'PN3','same',fingerprint,second)
+        self.assertEqual(joined['projects']['PN1']['group'],first)
+        self.assertEqual(joined['projects']['PN2']['group'],second)
+        self.assertEqual(joined['projects']['PN3']['group'],second)
+        joined,_=import_rows(joined,[row(3,audience='Опция 3: Мужчины')])
+        self.assertFalse(joined['projects']['PN3']['pending'])
+        separate=decide(state,'PN3','different',fingerprint)
+        self.assertEqual(len(summaries(separate)),3)
+        self.assertEqual(separate['projects']['PN1']['group'],first)
+        self.assertNotEqual(separate['projects']['PN3']['group'],first)
 
 if __name__ == '__main__':
     unittest.main()
