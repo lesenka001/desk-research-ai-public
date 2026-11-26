@@ -19,6 +19,7 @@ class Connection:
         self.events = []
         self.queries = []
         self.fail_history = False
+        self.import_reports = []
     def __enter__(self): return self
     def __exit__(self, *args): return False
     @contextmanager
@@ -30,6 +31,8 @@ class Connection:
             raise
     def execute(self, sql, params=()):
         self.queries.append(sql)
+        if sql.startswith('SELECT report FROM crm_history'):
+            return Result([(deepcopy(report),) for report in self.import_reports])
         if sql.startswith('SELECT data, revision'): return Result([(deepcopy(self.state), len(self.events))])
         if sql.startswith('SELECT data'): return Result([(deepcopy(self.state),)])
         if sql.startswith('UPDATE crm_dataset'):
@@ -77,5 +80,66 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(conn.events[0][0], 'decision')
         self.assertEqual(conn.events[0][2].obj['before']['pending'], ['audience'])
 
+
+
+class MetadataStoreTests(unittest.TestCase):
+    def legacy(self):
+        conn = Connection()
+        state, _ = domain.import_rows(domain.empty_state(), [row()])
+        conn.state = {k: state[k] for k in ('projects', 'aliases')}
+        # Earliest event predates more than one dashboard page of events.
+        conn.import_reports = [dict(rows=[row(2, ir=0)])] + [dict(rows=[]) for _ in range(35)]
+        return conn
+
+    def test_load_upgrades_full_history_once_and_keeps_original_data(self):
+        conn = self.legacy()
+        old = deepcopy(conn.state)
+        with patch.object(store.db, 'connect', return_value=conn):
+            loaded, _, _ = store.load()
+            store.load()
+        self.assertEqual(domain.project_info(loaded, '100')['total'], 2)
+        self.assertEqual(loaded['projects'], old['projects'])
+        self.assertEqual(loaded['aliases'], old['aliases'])
+        self.assertEqual(len(conn.events), 1)
+        full = [q for q in conn.queries if q.startswith('SELECT report')]
+        self.assertEqual(len(full), 1)
+        self.assertNotIn('LIMIT', full[0])
+        self.assertIn('FOR UPDATE', conn.queries[1])
+
+    def test_upgrade_rolls_back_on_audit_failure(self):
+        conn = self.legacy()
+        before = deepcopy(conn.state)
+        conn.fail_history = True
+        with patch.object(store.db, 'connect', return_value=conn):
+            with self.assertRaises(RuntimeError): store.load()
+        self.assertEqual(conn.state, before)
+        self.assertFalse(conn.events)
+
+    def test_rename_persists_and_audits_without_changing_ir(self):
+        conn = self.legacy()
+        with patch.object(store.db, 'connect', return_value=conn):
+            state, _, _ = store.load()
+            group = domain.group_catalog(state)[0]
+            original = deepcopy(state['projects'])
+            store.rename('100', group['group'], 'Покупатели', domain.identity(group['meta']))
+            loaded, _, _ = store.load()
+        self.assertEqual(domain.group_catalog(loaded)[0]['label'], 'ЦА 1 — Покупатели')
+        self.assertEqual(loaded['projects'], original)
+        report = conn.events[-1][2].obj
+        self.assertEqual((report['before']['name'], report['after']['name']), ('', 'Покупатели'))
+        conn.fail_history = True
+        before = deepcopy(conn.state)
+        meta = domain.group_catalog(before)[0]['meta']
+        with patch.object(store.db, 'connect', return_value=conn):
+            with self.assertRaises(RuntimeError):
+                store.rename('100', group['group'], 'Сбой', domain.identity(meta))
+        self.assertEqual(conn.state, before)
+
+    def test_first_mutation_also_upgrades_before_operation(self):
+        conn = self.legacy()
+        with patch.object(store.db, 'connect', return_value=conn), patch.object(domain, 'read_xlsx', return_value=[row(3)]):
+            store.upload(b'file', 'file.xlsx')
+        self.assertEqual(domain.project_info(conn.state, '100')['total'], 3)
+        self.assertEqual(len(conn.events), 2)
 
 if __name__ == '__main__': unittest.main()
