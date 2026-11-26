@@ -165,7 +165,7 @@ def table(headers, rows):
 
 
 def percent(value):
-    return f'{domain.rounded(value)}%'
+    return '—' if value is None else f'{domain.rounded(value)}%'
 
 
 def action_form(token, pn, record, action, label, extra='', css_class=''):
@@ -181,33 +181,29 @@ def review_cards(state, token, query):
     records.sort(key=lambda item: (item[1]['data']['aorg'], item[1]['data']['date'], domain.pn_number(item[0])))
     selected, pagination = page_slice(records, query)
     cards = []
+    catalog = domain.group_catalog(state)
     for pn, record in selected:
         data = record['data']
+        info = domain.project_info(state, data['aorg'])
         common = (f'<div class="card-top"><h3>{esc(pn)} · аорг {esc(data["aorg"])}</h3>'
+                  f'<span class="badge">{esc(info["project_type"])}</span>'
+                  f'<span class="muted">Всего волн проекта: {info["total"]}</span>'
                   f'<span class="badge">IR {percent(data["ir"])}</span><span>N {data["n"]}</span>'
                   f'<span class="muted">Поле завершено {esc(data["date"])}</span></div>')
         fallback = '<p class="muted">До решения используются прежние принятые данные этого PN.</p>' if record.get('accepted') else ''
         if 'audience' in record['pending']:
-            known = {}
-            for other in state['projects'].values():
-                if other.get('excluded'):
-                    continue
-                versions = [other['data']]
-                if other.get('accepted'): versions.append(other['accepted']['data'])
-                for d in versions:
-                    if d['aorg'] == data['aorg']:
-                        group = state['aliases'].get(d['aorg'], {}).get(domain.audience_key(d['audience']))
-                        if group is not None: known[group] = d['audience']
-            for group in set(state['aliases'].get(data['aorg'], {}).values()):
-                known.setdefault(group, group.replace('\x01', '').replace('\x02', ''))
-            options = ''.join(f'<option value="{k.encode().hex()}">{esc(v[:160])}</option>' for k,v in known.items())
-            comparisons = ''.join(f'<details><summary>Существующая ЦА {i}</summary><div class="audience">{esc(v)}</div></details>' for i,v in enumerate(known.values(), 1))
-            extra = f'<div><label for="target-{pn}">Существующая группа ЦА</label><select id="target-{pn}" name="target" required>{options}</select></div>'
+            known = [g for g in catalog if g['aorg'] == data['aorg']]
+            options = '<option value="" selected disabled>Выбери группу ЦА</option>' + ''.join(
+                f'<option value="{g["group"].encode().hex()}">{esc(g["label"])}</option>' for g in known)
+            comparisons = ''.join(
+                f'<section class="group-comparison"><h3>{esc(g["label"])}</h3>{group_details(g)}</section>'
+                for g in known)
+            extra = f'<div><label for="target-{pn}">Отнести волну к группе</label><select id="target-{pn}" name="target" required>{options}</select></div>'
             content = ('<span class="badge warn">Отличается описание ЦА</span><div class="compare">'
                        f'<div><h3>Новая волна</h3><div class="audience">{esc(data["audience"])}</div></div>'
-                       f'<div><h3>Принятые группы</h3>{comparisons}</div></div>{fallback}<div class="actions">'
-                       + action_form(token,pn,record,'same','Это та же ЦА',extra)
-                       + action_form(token,pn,record,'different','Это другая ЦА',css_class='secondary') + '</div>')
+                       f'<div><h3>Существующие группы ЦА</h3>{comparisons}</div></div>{fallback}<div class="actions">'
+                       + action_form(token,pn,record,'same','Отнести к выбранной группе ЦА',extra)
+                       + action_form(token,pn,record,'different','Создать отдельную группу ЦА',css_class='secondary') + '</div>')
         else:
             peers = [r['data'] for r in state['projects'].values() if not r.get('excluded')
                      and r['data']['aorg'] == data['aorg'] and r.get('group') == record['group']]
@@ -223,38 +219,79 @@ def review_cards(state, token, query):
     return ''.join(cards) + pagination if cards else '<div class="empty">Спорных строк нет. Корректные новые волны будут учитываться автоматически.</div>'
 
 
-def projects_view(state, query):
+def group_details(group):
+    descriptions = ''.join(f'<div class="audience">{esc(d)}</div>' for d in group['descriptions'])
+    if not descriptions:
+        descriptions = '<p class="muted">Исходное описание в доступной истории не сохранилось.</p>'
+    members = table(['PN', 'Статус'], [[esc(r['pn']), esc(r['status'])] for r in group['members']])
+    return (f'<details open><summary>Полные описания ЦА</summary>{descriptions}</details>'
+            f'<details><summary>Связанные PN ({len(group["members"])})</summary>{members}</details>')
+
+
+def rename_form(group, token):
+    key = group['group'].encode().hex()
+    field = 'name-' + domain.identity([group['aorg'], group['group']])[:16]
+    return (f'<details class="rename"><summary>Изменить название ЦА</summary>'
+            f'<form method="post" action="/crm/rename">{hidden(token)}'
+            f'<input type="hidden" name="aorg" value="{esc(group["aorg"])}">'
+            f'<input type="hidden" name="group" value="{key}">'
+            f'<input type="hidden" name="fingerprint" value="{domain.identity(group["meta"])}">'
+            f'<label for="{field}">Название (необязательно)</label>'
+            f'<input id="{field}" name="name" maxlength="200" value="{esc(group["meta"].get("name", ""))}">'
+            '<span class="muted">Очисти поле, чтобы оставить только номер ЦА.</span>'
+            '<button class="secondary">Сохранить название</button></form></details>')
+
+
+def projects_view(state, query, token=None):
     search = query.get('q', [''])[0][:150].casefold()
-    groups = domain.summaries(state)
+    groups = domain.group_catalog(state)
+    # Include projects consisting solely of rejected rows, without inventing a group.
+    grouped = {g['aorg'] for g in groups}
+    for aorg, waves in state.get('known_waves', {}).items():
+        if aorg not in grouped:
+            groups.append(dict(aorg=aorg, group=None, label='Группа ЦА не определена',
+                               descriptions=list(dict.fromkeys(d for w in waves.values() for d in w['descriptions'])),
+                               members=[dict(pn=pn, status='Исключена / история') for pn in waves],
+                               summary=None, **domain.project_info(state, aorg)))
     if search:
-        groups = [g for g in groups if search in (g['aorg'] + ' ' + g['audience'] + ' ' + ' '.join(r['pn'] for r in g['rows'])).casefold()]
+        groups = [g for g in groups if search in (' '.join([g['aorg'],g['label']] + g['descriptions']
+                  + [r['pn'] for r in g['members']])).casefold()]
     selected, pagination = page_slice(groups, query)
     rows = []
     for g in selected:
-        details = table(['PN', 'Дата поля','IR','N'], [[esc(r['pn']),esc(r['date']),percent(r['ir']),str(r['n'])] for r in sorted(g['rows'],key=lambda r:r['date'],reverse=True)])
-        rows.append([f'<b>{esc(g["aorg"])}</b><br>{esc(g["latest"])}<br><span class="muted">{g["date"]}</span>',
-                     f'<div class="audience">{esc(g["audience"])}</div><details><summary>Расчетные волны</summary>{details}</details>',
-                     f'<b class="numeric">{percent(g["mean"])}</b>',
-                     f'<span class="numeric">{percent(g["low"])} … {percent(g["high"])}</span>',
-                     f'{g["count"]}<br><span class="muted">Всего в трекере: {g["total"]}</span>'])
+        summary = g['summary']
+        latest = (f'<br>{esc(summary["latest"])}<br><span class="muted">{esc(summary["date"])}</span>') if summary else ''
+        description = (f'<h3>{esc(g["label"])}</h3>' + group_details(g)
+                       + (rename_form(g, token) if token and g['group'] is not None else ''))
+        rows.append([f'<b>аорг {esc(g["aorg"])}</b> <span class="badge">{esc(g["project_type"])}</span>'
+                     f'<p class="muted">Всего волн проекта: {g["total"]}</p>{latest}',
+                     description,
+                     f'<b class="numeric">{percent(summary["mean"]) if summary else "Нет расчетных волн"}</b>',
+                     f'<span class="numeric">{percent(summary["low"])} … {percent(summary["high"])}</span>' if summary else '—',
+                     str(summary['count']) if summary else '0'])
     search_form = (f'<form class="search" method="get" action="/crm"><input type="hidden" name="tab" value="projects">'
-                   f'<input name="q" aria-label="Поиск по PN, аорг или ЦА" placeholder="PN, аорг или описание ЦА" value="{esc(query.get("q",[""])[0][:150])}">'
+                   f'<input name="q" aria-label="Поиск по PN, аорг, названию или описанию ЦА" placeholder="PN, аорг, название или описание ЦА" value="{esc(query.get("q",[""])[0][:150])}">'
                    '<button class="secondary">Найти</button></form>')
-    excluded = []
-    for pn,r in state['projects'].items():
-        if r.get('outlier') and not r.get('excluded'):
-            d=r['data']
-            excluded.append([esc(pn),esc(d['aorg']),f'<div class="audience">{esc(d["audience"])}</div>',percent(d['ir'])])
-    extras = ('<details><summary>Исключенные выбросы (' + str(len(excluded)) + ')</summary>'
-              + table(['PN','Аорг','ЦА','IR'],excluded) + '</details>') if excluded else ''
-    return search_form + (table(['Аорг / последний PN','Целевая аудитория','Средний IR','Диапазон IR','Волн в расчете'],rows) if rows else '<div class="empty">Расчетных проектов пока нет.</div>') + pagination + extras
+    return search_form + (table(['Проект / последний расчетный PN','Группа целевой аудитории','Средний IR','Диапазон IR','Волн в расчете'],rows)
+                         if rows else '<div class="empty">Проектов по этому запросу пока нет.</div>') + pagination
+
+
+def decision_description(report):
+    action = report.get('action', '')
+    if action == 'initialize_metadata':
+        return 'Добавлены постоянные номера ЦА и сведения обо всех известных волнах.'
+    if action == 'rename_group':
+        return f'аорг {report.get("aorg", "")} · Название группы: {report.get("group_label", "")}'
+    labels = {'same':'Отнесено к группе', 'different':'Создана отдельная группа',
+              'keep':'Включено в расчет', 'exclude':'Исключено как выброс'}
+    return f'{report.get("pn", "")} · {labels.get(action, action)} · {report.get("group_label", "")}'
 
 
 def history_view(events, query):
     rows = []
     for event_id, created, kind, filename, report in events:
         summary = (f'Добавлено {report.get("added",0)} · заменено {report.get("updated",0)} · '
-                   f'исключено {report.get("excluded",0)} · на проверке {report.get("pending",0)}') if kind=='import' else f'{report.get("pn", "")} · {report.get("action", "")}'
+                   f'исключено {report.get("excluded",0)} · на проверке {report.get("pending",0)}') if kind=='import' else decision_description(report)
         rows.append([esc(str(created)[:19]),f'<a href="/crm?event={event_id}">{esc(filename or "Решение проверки")}</a>',esc(summary)])
     older = f'<a href="/crm?tab=history&amp;before={events[-1][0]}">Более ранние записи</a>' if len(events)==30 else ''
     return (table(['Когда','Загрузка / решение','Результат'],rows) if rows else '<div class="empty">История появится после первой загрузки.</div>') + f'<div class="pagination">{older}</div>'
@@ -265,7 +302,14 @@ def event_view(event, query):
     event_id, created, kind, filename, report = event
     heading = f'<h2 class="filename">{esc(filename or "Решение проверки")}</h2><p class="muted">{esc(str(created)[:19])}</p>'
     if kind != 'import':
-        return heading + f'<p>{esc(report.get("pn"))}: {esc(report.get("action"))}</p>'
+        result = f'<div class="notice">{esc(decision_description(report))}</div>'
+        if report.get('affected'):
+            result += f'<p>Обновлены волны: {esc(", ".join(report["affected"]))}</p>'
+        if 'outlier' in report.get('pending', []):
+            result += '<p class="badge warn">ЦА сохранена. Требуется отдельная проверка выброса IR.</p>'
+        if report.get('action') == 'rename_group':
+            result += f'<p>Прежнее название: {esc(report["before"].get("name") or "без названия")}</p>'
+        return heading + result + '<p><a href="/crm">Продолжить проверку</a> · <a href="/crm?tab=projects">Проекты и волны</a></p>' 
     labels = {'added':'Добавлено','updated':'Заменено','unchanged':'Без изменений','excluded':'Исключено','pending':'На проверке'}
     summary = '<div class="notice">' + ' · '.join(f'{label}: {report.get(key,0)}' for key,label in labels.items()) + '</div>'
     selected, pagination = page_slice(report.get('rows', []), query)
@@ -303,7 +347,7 @@ def dashboard(token, query):
     nav = '<nav>' + ''.join(f'<a class="{"active" if tab==key else ""}" href="/crm?tab={key}">{name}</a>'
                             for key,name in [('review',f'Проверка ({pending})'),('projects','Проекты и волны'),('history','История')]) + '</nav>'
     if 'event' in query: content=event_view(store.history(bounded_int(query['event'][0])),query)
-    elif tab=='projects': content=projects_view(state,query)
+    elif tab=='projects': content=projects_view(state,query,token)
     elif tab=='history': content=history_view(events,query)
     else: content=review_cards(state,token,query)
     return shell(top + nav + '<section class="section">' + content + '</section>'
@@ -401,8 +445,12 @@ def routes(handler):
         elif parsed.path=='/crm/decide':
             target=fields.get('target')
             if target: target=bytes.fromhex(target).decode('utf-8')
-            store.decision(fields.get('pn',''),fields.get('action',''),fields.get('fingerprint',''),target)
-            redirect(handler,'/crm')
+            event_id,_=store.decision(fields.get('pn',''),fields.get('action',''),fields.get('fingerprint',''),target)
+            redirect(handler,f'/crm?event={event_id}')
+        elif parsed.path=='/crm/rename':
+            group=bytes.fromhex(fields.get('group','')).decode('utf-8')
+            event_id,_=store.rename(fields.get('aorg',''),group,fields.get('name',''),fields.get('fingerprint',''))
+            redirect(handler,f'/crm?event={event_id}')
         else:
             response(handler,'Страница не найдена',404)
     except (domain.IntakeError,ValueError,UnicodeError) as error:
