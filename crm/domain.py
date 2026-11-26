@@ -161,7 +161,7 @@ def empty_state():
 
 
 
-def remember_rows(state, rows):
+def remember_rows(state, rows, confirmed=False):
     """Retain observed identities and source text even for rejected import rows."""
     known = state.setdefault('known_waves', {})
     for entry in rows:
@@ -176,7 +176,36 @@ def remember_rows(state, rows):
         if audience and audience not in descriptions:
             descriptions.append(audience)
         waves[pn] = dict(data=deepcopy(data), descriptions=descriptions,
-                         status=entry.get('status', 'history'))
+                         confirmed=confirmed or previous.get('confirmed', False))
+
+
+def remember_import_rows(state, rows):
+    identities = defaultdict(set)
+    for aorg, waves in state.get('known_waves', {}).items():
+        for pn in waves:
+            identities[pn].add(aorg)
+    for pn, aorgs in state.get('identity_issues', {}).items():
+        identities[pn].update(aorgs)
+    for entry in rows:
+        data = entry.get('data', {})
+        pn, aorg = data.get('pn', ''), data.get('aorg', '')
+        if re.fullmatch(r'PN\d+', pn) and re.fullmatch(r'\d+', aorg):
+            identities[pn].add(aorg)
+    conflicts = {pn: sorted(aorgs) for pn, aorgs in identities.items() if len(aorgs) > 1}
+    if conflicts:
+        state.setdefault('identity_issues', {}).update(conflicts)
+        for aorg in list(state.get('known_waves', {})):
+            waves = state['known_waves'][aorg]
+            for pn in conflicts:
+                if pn in waves and not waves[pn].get('confirmed'):
+                    waves.pop(pn)
+            if not waves:
+                del state['known_waves'][aorg]
+    # Retain identities of valid rows committed by earlier imports, including
+    # waves later replaced or removed. This is independent of IR acceptance.
+    remember_rows(state, [r for r in rows if r.get('data', {}).get('pn') not in conflicts])
+    remember_rows(state, [r for r in rows if not r.get('reasons')
+                         and r.get('status') in ('added', 'updated', 'unchanged')], confirmed=True)
 
 
 def ensure_metadata(state):
@@ -186,7 +215,7 @@ def ensure_metadata(state):
         if record.get('accepted'):
             sources.append(dict(data=record['accepted']['data']))
         sources.append(dict(data=record['data']))
-    remember_rows(state, sources)
+    remember_rows(state, sources, confirmed=True)
     metadata = state.setdefault('group_meta', {})
     for aorg, aliases in state['aliases'].items():
         groups = metadata.setdefault(aorg, {})
@@ -204,8 +233,8 @@ def ensure_metadata(state):
 
 def upgrade_state(state, reports=()):
     state = deepcopy(state)
-    for report in reports:
-        remember_rows(state, report.get('rows', []))
+    history_rows = [entry for report in reports for entry in report.get('rows', [])]
+    remember_import_rows(state, history_rows)
     ensure_metadata(state)
     state['metadata_version'] = 5
     return state
@@ -249,12 +278,12 @@ def group_catalog(state):
                     continue
                 record = state['projects'].get(pn)
                 status = 'Исключена / история'
-                if record and record['data']['aorg'] == aorg:
-                    accepted = record.get('accepted')
+                accepted = record.get('accepted') if record else None
+                if accepted and accepted['data']['aorg'] == aorg and accepted['group'] == key:
+                    status = 'В расчете (прежние данные)' if record.get('pending') else 'В расчете'
+                elif record and record['data']['aorg'] == aorg:
                     if record.get('excluded'):
                         status = 'Исключена при импорте'
-                    elif accepted and accepted['data']['aorg'] == aorg and accepted['group'] == key:
-                        status = 'В расчете (прежние данные)' if record.get('pending') else 'В расчете'
                     elif record.get('group') == key:
                         status = 'На проверке' if record.get('pending') else 'Исключена как выброс'
                     else:
@@ -333,7 +362,7 @@ def refresh(state):
 
 def import_rows(state, rows):
     state = upgrade_state(state)
-    remember_rows(state, rows)
+    remember_import_rows(state, rows)
     report = dict(added=0, updated=0, unchanged=0, excluded=0, pending=0, rows=[])
     by_pn = defaultdict(list)
     for row in rows:

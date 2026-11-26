@@ -246,4 +246,14 @@ class HTTPTests(unittest.TestCase):
         self.assertIn('аорг 200',body)
         self.assertIn('Изменить название ЦА',body)
 
+
+    def test_ambiguous_history_warning_is_visible_and_escaped(self):
+        self.login()
+        self.memory.state=domain.upgrade_state(dict(projects={},aliases={}),
+            [dict(rows=[row(3,aorg='300')]),dict(rows=[row(3,aorg='400'),row(4,aorg='400')])])
+        body=self.request('/crm?tab=projects')[2]
+        self.assertIn('Ограничение истории проектов',body)
+        self.assertIn('PN3: разные аорг в истории',body)
+        self.assertIn('Неподтвержденные исторические связи не учтены',body)
+
 if __name__=='__main__': unittest.main()

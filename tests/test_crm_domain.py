@@ -232,5 +232,54 @@ class ProjectMetadataTests(unittest.TestCase):
             with self.assertRaises(IntakeError):
                 rename_group(state, aorg, g['group'], name, identity(g['meta']))
 
+
+class MetadataReviewRegressions(unittest.TestCase):
+    def test_ambiguous_history_does_not_invent_tracker(self):
+        from crm.domain import upgrade_state, project_info
+        legacy = dict(projects={}, aliases={})
+        state = upgrade_state(legacy, [dict(rows=[row(3,aorg='300')]),
+                                      dict(rows=[row(3,aorg='400'),row(4,aorg='400')])])
+        self.assertEqual(state['identity_issues']['PN3'], ['300','400'])
+        self.assertEqual(project_info(state,'400'), dict(total=1,project_type='эдхок'))
+        self.assertEqual(project_info(state,'300')['total'],0)
+        self.assertEqual(upgrade_state(state),state)
+
+    def test_conflicting_file_identity_is_not_used_for_type(self):
+        from crm.domain import project_info
+        state,_=import_rows(empty_state(),[row(1,aorg='300'),row(1,aorg='400'),row(2,aorg='400')])
+        self.assertEqual(project_info(state,'400')['total'],1)
+        self.assertIn('PN1',state['identity_issues'])
+
+    def test_sequential_rejections_and_history_upgrade_agree(self):
+        from crm.domain import upgrade_state, project_info
+        state, first=import_rows(empty_state(),[row(3,aorg='300',ir=0)])
+        state, second=import_rows(state,[row(3,aorg='400',ir=0),row(4,aorg='400',ir=0)])
+        restored=upgrade_state(dict(projects={},aliases={}),[first,second])
+        self.assertEqual(state['known_waves'],restored['known_waves'])
+        self.assertEqual(state['identity_issues'],restored['identity_issues'])
+        self.assertEqual(project_info(state,'400')['total'],1)
+        self.assertEqual(upgrade_state(state),state)
+
+    def test_confirmed_identity_survives_aorg_replacement_and_history_upgrade(self):
+        from crm.domain import upgrade_state, project_info
+        state, first=import_rows(empty_state(),[row(),row(2)])
+        state, second=import_rows(state,[row(aorg='200')])
+        self.assertEqual(project_info(state,'100')['total'],2)
+        self.assertEqual(project_info(state,'100')['project_type'],'трекер')
+        self.assertTrue(state['known_waves']['100']['PN1']['confirmed'])
+        legacy={k:deepcopy(state[k]) for k in ('projects','aliases')}
+        restored=upgrade_state(legacy,[first,second])
+        self.assertEqual(project_info(restored,'100')['total'],2)
+        self.assertEqual(project_info(restored,'200')['total'],1)
+        self.assertEqual(upgrade_state(state),state)
+
+    def test_pending_aorg_change_keeps_previous_accepted_status(self):
+        from crm.domain import group_catalog
+        state,_=import_rows(empty_state(),[row(audience='A'),row(2,aorg='200',audience='B')])
+        state,_=import_rows(state,[row(aorg='200',audience='C',ir=40)])
+        old=next(g for g in group_catalog(state) if g['aorg']=='100')
+        self.assertEqual(old['summary']['count'],1)
+        self.assertEqual(old['members'][0]['status'],'В расчете (прежние данные)')
+
 if __name__ == '__main__':
     unittest.main()

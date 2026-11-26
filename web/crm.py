@@ -309,7 +309,7 @@ def event_view(event, query):
             result += '<p class="badge warn">ЦА сохранена. Требуется отдельная проверка выброса IR.</p>'
         if report.get('action') == 'rename_group':
             result += f'<p>Прежнее название: {esc(report["before"].get("name") or "без названия")}</p>'
-        return heading + result + '<p><a href="/crm">Продолжить проверку</a> · <a href="/crm?tab=projects">Проекты и волны</a></p>' 
+        return heading + result + '<p><a href="/crm">Продолжить проверку</a> · <a href="/crm?tab=projects">Проекты и волны</a></p>'
     labels = {'added':'Добавлено','updated':'Заменено','unchanged':'Без изменений','excluded':'Исключено','pending':'На проверке'}
     summary = '<div class="notice">' + ' · '.join(f'{label}: {report.get(key,0)}' for key,label in labels.items()) + '</div>'
     selected, pagination = page_slice(report.get('rows', []), query)
@@ -350,7 +350,12 @@ def dashboard(token, query):
     elif tab=='projects': content=projects_view(state,query,token)
     elif tab=='history': content=history_view(events,query)
     else: content=review_cards(state,token,query)
-    return shell(top + nav + '<section class="section">' + content + '</section>'
+    issues = ''.join(f'<p>{esc(pn)}: разные аорг в истории — {esc(", ".join(aorgs))}.</p>'
+                     for pn,aorgs in state.get('identity_issues', {}).items())
+    warning = ('<div class="notice error"><b>Ограничение истории проектов</b>' + issues
+               + '<p>Неподтвержденные исторические связи не учтены в типе и числе волн. '
+                 'Использованы однозначные связи и сохраненные данные проектов.</p></div>') if issues else ''
+    return shell(top + warning + nav + '<section class="section">' + content + '</section>'
                  '<p class="footnote">Средний IR и диапазон относятся к принятым волнам одной ЦА. '
                  'Показатели округлены до целого процента; расчеты используют исходную точность.</p>',token)
 
