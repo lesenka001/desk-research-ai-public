@@ -157,7 +157,116 @@ def read_xlsx(content):
 
 
 def empty_state():
-    return dict(projects={}, aliases={})
+    return dict(projects={}, aliases={}, known_waves={}, group_meta={}, metadata_version=5)
+
+
+
+def remember_rows(state, rows):
+    """Retain observed identities and source text even for rejected import rows."""
+    known = state.setdefault('known_waves', {})
+    for entry in rows:
+        data = entry.get('data', {})
+        pn, aorg = data.get('pn', ''), data.get('aorg', '')
+        if not re.fullmatch(r'PN\d+', pn) or not re.fullmatch(r'\d+', aorg):
+            continue
+        waves = known.setdefault(aorg, {})
+        previous = waves.get(pn, {})
+        descriptions = list(previous.get('descriptions', []))
+        audience = data.get('audience', '')
+        if audience and audience not in descriptions:
+            descriptions.append(audience)
+        waves[pn] = dict(data=deepcopy(data), descriptions=descriptions,
+                         status=entry.get('status', 'history'))
+
+
+def ensure_metadata(state):
+    """Add metadata without changing existing aliases, accepted data or decisions."""
+    sources = []
+    for record in state['projects'].values():
+        if record.get('accepted'):
+            sources.append(dict(data=record['accepted']['data']))
+        sources.append(dict(data=record['data']))
+    remember_rows(state, sources)
+    metadata = state.setdefault('group_meta', {})
+    for aorg, aliases in state['aliases'].items():
+        groups = metadata.setdefault(aorg, {})
+        for key in sorted(set(aliases.values())):
+            if key not in groups:
+                number = max((g['number'] for g in groups.values()), default=0) + 1
+                groups[key] = dict(number=number, name='', descriptions=[])
+        for wave in state.get('known_waves', {}).get(aorg, {}).values():
+            for description in wave['descriptions']:
+                key = aliases.get(audience_key(description))
+                if key in groups and description not in groups[key]['descriptions']:
+                    groups[key]['descriptions'].append(description)
+    return state
+
+
+def upgrade_state(state, reports=()):
+    state = deepcopy(state)
+    for report in reports:
+        remember_rows(state, report.get('rows', []))
+    ensure_metadata(state)
+    state['metadata_version'] = 5
+    return state
+
+
+def project_info(state, aorg):
+    total = len(state.get('known_waves', {}).get(aorg, {}))
+    return dict(total=total, project_type='трекер' if total > 1 else 'эдхок')
+
+
+def group_label(meta):
+    label = f'ЦА {meta["number"]}'
+    return label + (' — ' + meta['name'] if meta.get('name') else '')
+
+
+def rename_group(state, aorg, group, name, fingerprint):
+    state = upgrade_state(state)
+    meta = state.get('group_meta', {}).get(aorg, {}).get(group)
+    if meta is None or group not in set(state['aliases'].get(aorg, {}).values()):
+        raise IntakeError('Группа ЦА не найдена. Обнови страницу.')
+    if identity(meta) != fingerprint:
+        raise IntakeError('Название или данные группы изменились. Обнови страницу.')
+    name = name.strip()
+    if len(name) > 200:
+        raise IntakeError('Название ЦА должно содержать не больше 200 символов.')
+    meta['name'] = name
+    return state
+
+
+def group_catalog(state):
+    """All groups, including groups with no currently accepted IR."""
+    state = upgrade_state(state)
+    calculated = {(g['aorg'], g['group']): g for g in summaries(state)}
+    result = []
+    for aorg, groups in state['group_meta'].items():
+        aliases = state['aliases'].get(aorg, {})
+        for key, meta in groups.items():
+            members = []
+            for pn, wave in state.get('known_waves', {}).get(aorg, {}).items():
+                if not any(aliases.get(audience_key(d)) == key for d in wave['descriptions']):
+                    continue
+                record = state['projects'].get(pn)
+                status = 'Исключена / история'
+                if record and record['data']['aorg'] == aorg:
+                    accepted = record.get('accepted')
+                    if record.get('excluded'):
+                        status = 'Исключена при импорте'
+                    elif accepted and accepted['data']['aorg'] == aorg and accepted['group'] == key:
+                        status = 'В расчете (прежние данные)' if record.get('pending') else 'В расчете'
+                    elif record.get('group') == key:
+                        status = 'На проверке' if record.get('pending') else 'Исключена как выброс'
+                    else:
+                        status = 'История описания ЦА'
+                members.append(dict(pn=pn, status=status))
+            members.sort(key=lambda r: pn_number(r['pn']))
+            item = dict(aorg=aorg, group=key, label=group_label(meta), meta=meta,
+                        descriptions=meta['descriptions'], members=members,
+                        summary=calculated.get((aorg, key)))
+            item.update(project_info(state, aorg))
+            result.append(item)
+    return sorted(result, key=lambda g: (g['aorg'], g['meta']['number']))
 
 
 def bounds(values):
@@ -218,11 +327,13 @@ def refresh(state):
             record['accepted'] = None
         else:
             record['accepted'] = dict(data=deepcopy(record['data']), group=record['group'])
+    ensure_metadata(state)
     return state
 
 
 def import_rows(state, rows):
-    state = deepcopy(state)
+    state = upgrade_state(state)
+    remember_rows(state, rows)
     report = dict(added=0, updated=0, unchanged=0, excluded=0, pending=0, rows=[])
     by_pn = defaultdict(list)
     for row in rows:
@@ -261,7 +372,7 @@ def import_rows(state, rows):
 
 
 def decide(state, pn, action, fingerprint, target=None):
-    state = deepcopy(state)
+    state = upgrade_state(state)
     record = state['projects'].get(pn)
     if not record or record.get('excluded') or identity(record['data']) != fingerprint:
         raise IntakeError('Данные изменились. Обнови страницу проверки.')
@@ -281,12 +392,9 @@ def decide(state, pn, action, fingerprint, target=None):
 
 def summaries(state):
     groups = defaultdict(list)
-    totals = defaultdict(int)
     for record in state['projects'].values():
         if record.get('excluded'):
             continue
-        counting = record['accepted']['data'] if record.get('pending') and record.get('accepted') else record['data']
-        totals[counting['aorg']] += 1
         if record.get('accepted'):
             accepted = record['accepted']
             groups[(accepted['data']['aorg'], accepted['group'])].append(accepted['data'])
@@ -295,6 +403,6 @@ def summaries(state):
         latest = max(rows, key=lambda r: (r['date'], pn_number(r['pn'])))
         values = [r['ir'] for r in rows]
         result.append(dict(aorg=aorg, group=group, audience=latest['audience'], latest=latest['pn'],
-                           date=latest['date'], count=len(rows), total=totals[aorg],
+                           date=latest['date'], count=len(rows), **project_info(state, aorg),
                            mean=sum(values) / len(values), low=min(values), high=max(values), rows=rows))
     return sorted(result, key=lambda g: (g['date'], pn_number(g['latest'])), reverse=True)

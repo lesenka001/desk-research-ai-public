@@ -167,5 +167,70 @@ class TrackerTests(unittest.TestCase):
         self.assertAlmostEqual(summaries(state)[0]['mean'], 8.36)
 
 
+
+class ProjectMetadataTests(unittest.TestCase):
+    def test_type_counts_rejected_pending_and_deleted_waves(self):
+        from crm.domain import project_info, upgrade_state
+        state, _ = import_rows(empty_state(), [row(), row(2, audience='Женщины'), row(3, ir=0)])
+        self.assertEqual(project_info(state, '100'), dict(total=3, project_type='трекер'))
+        self.assertEqual(summaries(state)[0]['count'], 1)
+        state['projects'].pop('PN2')
+        state, _ = import_rows(state, [row()])
+        self.assertEqual(project_info(state, '100')['total'], 3)
+        self.assertEqual(upgrade_state(state), state)
+
+    def test_history_upgrade_numbers_and_names_do_not_change_decisions(self):
+        from crm.domain import upgrade_state, group_catalog, rename_group
+        state, report = import_rows(empty_state(), [row(), row(2, ir=0)])
+        state = {k: state[k] for k in ('projects', 'aliases')}
+        original = deepcopy(state)
+        state = upgrade_state(state, [report])
+        self.assertEqual(state['projects'], original['projects'])
+        self.assertEqual(state['aliases'], original['aliases'])
+        g = group_catalog(state)[0]
+        state = rename_group(state, '100', g['group'], '  Покупатели  ', identity(g['meta']))
+        state, _ = import_rows(state, [row(3, audience='Другая ЦА')])
+        state = decide(state, 'PN3', 'different', identity(state['projects']['PN3']['data']))
+        groups = group_catalog(state)
+        self.assertEqual([g['label'] for g in groups], ['ЦА 1 — Покупатели', 'ЦА 2'])
+        self.assertEqual(summaries(state)[0]['mean'], 20)
+        with self.assertRaises(IntakeError):
+            rename_group(state, '100', g['group'], 'stale', identity(g['meta']))
+        first = groups[0]
+        state = rename_group(state, '100', first['group'], '', identity(first['meta']))
+        self.assertEqual(group_catalog(state)[0]['label'], 'ЦА 1')
+
+    def test_groups_without_ir_keep_descriptions_and_pn(self):
+        from crm.domain import group_catalog
+        state, _ = import_rows(empty_state(), [row(audience='Полный исходный текст ЦА')])
+        state, _ = import_rows(state, [row(ir=0)])
+        g = group_catalog(state)[0]
+        self.assertIsNone(g['summary'])
+        self.assertIn('Полный исходный текст ЦА', g['descriptions'])
+        self.assertEqual(g['members'][0]['pn'], 'PN1')
+
+    def test_third_wave_can_join_second_group_and_reimport(self):
+        from crm.domain import group_catalog
+        state, _ = import_rows(empty_state(), [row(), row(2, audience='Женщины', ir=20)])
+        state = decide(state, 'PN2', 'different', identity(state['projects']['PN2']['data']))
+        second = group_catalog(state)[1]
+        state, _ = import_rows(state, [row(3, audience='Женщины покупатели', ir=40)])
+        state = decide(state, 'PN3', 'same', identity(state['projects']['PN3']['data']), second['group'])
+        state, _ = import_rows(state, [row(3, audience='Женщины покупатели', ir=40)])
+        groups = group_catalog(state)
+        self.assertEqual(groups[1]['summary']['mean'], 30)
+        self.assertEqual(groups[1]['summary']['count'], 2)
+        self.assertEqual(groups[0]['summary']['count'], 1)
+        self.assertEqual([g['project_type'] for g in groups], ['трекер', 'трекер'])
+
+    def test_invalid_identity_not_invented_and_rename_limits(self):
+        from crm.domain import project_info, group_catalog, rename_group
+        state, _ = import_rows(empty_state(), [row(), row(2, aorg='PN2')])
+        self.assertEqual(project_info(state, '100')['total'], 1)
+        g = group_catalog(state)[0]
+        for aorg, name in [('999', 'name'), ('100', 'x' * 201)]:
+            with self.assertRaises(IntakeError):
+                rename_group(state, aorg, g['group'], name, identity(g['meta']))
+
 if __name__ == '__main__':
     unittest.main()
